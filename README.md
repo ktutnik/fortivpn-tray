@@ -10,8 +10,6 @@
 
 <p align="center">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white">
-  <img alt="Windows" src="https://img.shields.io/badge/Windows-0078D6?style=flat&logo=windows&logoColor=white">
-  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?style=flat&logo=linux&logoColor=black">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri_v2-24C8D8?style=flat&logo=tauri&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
@@ -92,7 +90,7 @@ src/                          # Frontend (settings UI)
 ## Features
 
 - One-click connect/disconnect from the system tray
-- Cross-platform (macOS, Windows, Linux)
+- macOS support (Windows and Linux planned)
 - Multiple VPN profile support
 - CLI companion for terminal workflows
 - Secure credential storage (OS keychain/credential manager)
