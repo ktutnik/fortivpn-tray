@@ -1,0 +1,16 @@
+[package]
+name = "fortivpn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "net", "rt"] }
+rustls = "0.23"
+webpki-roots = "1"
+tokio-rustls = "0.26"
+quick-xml = "0.37"
+tun2 = { version = "4", features = ["async"] }
+rand = "0.9"
+aws-lc-rs = "1"
+serde_json = "1"
+libc = "0.2"
