@@ -48,9 +48,8 @@ pub fn parse_vpn_config_xml(xml: &str) -> Result<VpnConfig, FortiError> {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                match name.as_str() {
-                    "dns" => in_dns = true,
-                    _ => {}
+                if name.as_str() == "dns" {
+                    in_dns = true;
                 }
                 current_text.clear();
             }

@@ -195,14 +195,20 @@ pub struct LcpState {
     pub peer_magic: u32,
 }
 
-impl LcpState {
-    pub fn new() -> Self {
+impl Default for LcpState {
+    fn default() -> Self {
         Self {
             magic_number: rand::random::<u32>(),
             mru: 1354,
             opened: false,
             peer_magic: 0,
         }
+    }
+}
+
+impl LcpState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn build_configure_request(&self, identifier: u8) -> PppPacket {
@@ -245,9 +251,8 @@ impl LcpState {
         let mut offset = 0;
         while offset < options_data.len() {
             if let Ok((opt, consumed)) = LcpOption::decode(&options_data[offset..]) {
-                match opt {
-                    LcpOption::Mru(mru) => self.mru = mru,
-                    _ => {}
+                if let LcpOption::Mru(mru) = opt {
+                    self.mru = mru;
                 }
                 offset += consumed;
             } else {
@@ -292,14 +297,20 @@ pub struct IpcpState {
     pub opened: bool,
 }
 
-impl IpcpState {
-    pub fn new() -> Self {
+impl Default for IpcpState {
+    fn default() -> Self {
         Self {
             local_ip: Ipv4Addr::UNSPECIFIED,
             primary_dns: Ipv4Addr::UNSPECIFIED,
             secondary_dns: Ipv4Addr::UNSPECIFIED,
             opened: false,
         }
+    }
+}
+
+impl IpcpState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn build_configure_request(&self, identifier: u8) -> PppPacket {

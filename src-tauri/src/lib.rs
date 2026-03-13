@@ -303,11 +303,7 @@ pub fn run() {
             has_password,
         ])
         .setup(|app| {
-            // Load profile store and seed default if empty
-            let mut store = ProfileStore::load();
-            if store.profiles.is_empty() {
-                // No default profile — user creates profiles via the UI
-            }
+            let store = ProfileStore::load();
 
             // Create state
             let vpn_manager = VpnManager::new();

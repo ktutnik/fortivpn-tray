@@ -8,7 +8,7 @@ pub fn create_tun(ip: Ipv4Addr, peer_ip: Ipv4Addr, mtu: u16) -> Result<AsyncDevi
     let mut config = Configuration::default();
     config.address(ip);
     config.destination(peer_ip);
-    config.mtu(mtu as u16);
+    config.mtu(mtu);
     config.up();
 
     #[cfg(target_os = "macos")]

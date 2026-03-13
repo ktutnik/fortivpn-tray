@@ -52,56 +52,54 @@ fn main() {
     writeln!(stream, "{command}").expect("Failed to send command");
     stream.flush().expect("Failed to flush");
 
-    // Read response
+    // Read single response line
     let reader = BufReader::new(&stream);
-    for line in reader.lines() {
-        let line = line.expect("Failed to read response");
-        let resp: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                println!("{line}");
-                break;
-            }
-        };
+    let Some(Ok(line)) = reader.lines().next() else {
+        eprintln!("No response from tray app");
+        std::process::exit(1);
+    };
 
-        if let Some(msg) = resp.get("message").and_then(|m| m.as_str()) {
-            if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
-                // Format output based on command
-                if let Some(data) = resp.get("data") {
-                    if let Some(status) = data.get("status") {
-                        // Status response
-                        let s = status.as_str().unwrap_or("unknown");
-                        let profile = data.get("profile").and_then(|p| p.as_str()).unwrap_or("");
-                        if profile.is_empty() {
-                            println!("VPN: {s}");
-                        } else {
-                            println!("VPN: {s} ({profile})");
-                        }
-                    } else if let Some(arr) = data.as_array() {
-                        // List response
-                        if arr.is_empty() {
-                            println!("No profiles configured.");
-                        } else {
-                            println!("Profiles:");
-                            for p in arr {
-                                let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                                let host = p.get("host").and_then(|h| h.as_str()).unwrap_or("?");
-                                let port = p.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
-                                println!("  {name} ({host}:{port})");
-                            }
-                        }
+    let resp: serde_json::Value = match serde_json::from_str(&line) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("{line}");
+            return;
+        }
+    };
+
+    if let Some(msg) = resp.get("message").and_then(|m| m.as_str()) {
+        if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
+            if let Some(data) = resp.get("data") {
+                if let Some(status) = data.get("status") {
+                    let s = status.as_str().unwrap_or("unknown");
+                    let profile = data.get("profile").and_then(|p| p.as_str()).unwrap_or("");
+                    if profile.is_empty() {
+                        println!("VPN: {s}");
                     } else {
-                        println!("{msg}");
+                        println!("VPN: {s} ({profile})");
+                    }
+                } else if let Some(arr) = data.as_array() {
+                    if arr.is_empty() {
+                        println!("No profiles configured.");
+                    } else {
+                        println!("Profiles:");
+                        for p in arr {
+                            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            let host = p.get("host").and_then(|h| h.as_str()).unwrap_or("?");
+                            let port = p.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+                            println!("  {name} ({host}:{port})");
+                        }
                     }
                 } else {
                     println!("{msg}");
                 }
             } else {
-                eprintln!("Error: {msg}");
-                std::process::exit(1);
+                println!("{msg}");
             }
+        } else {
+            eprintln!("Error: {msg}");
+            std::process::exit(1);
         }
-        break; // One response per command
     }
 }
 

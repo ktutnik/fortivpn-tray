@@ -97,7 +97,7 @@ impl VpnSession {
             move || auth::authenticate(&host, port, &username, &password, &trusted_cert)
         })
         .await
-        .map_err(|e| FortiError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| FortiError::Io(std::io::Error::other(e)))??;
 
         // Phase 2: Open async TLS tunnel
         let mut tls_stream = bridge::async_tls_connect(host, port, trusted_cert).await?;

@@ -212,7 +212,7 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
             .output()
             .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return parse_gateway_output(&stdout);
+        parse_gateway_output(&stdout)
     }
 
     #[cfg(target_os = "windows")]
@@ -299,7 +299,7 @@ fn disable_ipv6() -> Vec<String> {
                 .args(["-setv6off", iface])
                 .output();
         }
-        return interfaces;
+        interfaces
     }
 
     #[cfg(not(target_os = "macos"))]
