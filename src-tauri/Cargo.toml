@@ -1,0 +1,33 @@
+[workspace]
+members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cli"]
+
+[package]
+name = "fortivpn-tray"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+default-run = "fortivpn-tray"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "fortivpn_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+fortivpn = { path = "crates/fortivpn" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["apple-native"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "net"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
+objc2 = "0.6"
