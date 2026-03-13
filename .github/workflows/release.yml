@@ -46,6 +46,8 @@ jobs:
 
       - name: Build Tauri app
         working-directory: src-tauri
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
         run: cargo tauri build --target ${{ matrix.target }}
 
       - name: Upload artifacts

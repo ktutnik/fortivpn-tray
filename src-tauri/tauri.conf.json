@@ -25,10 +25,7 @@
     ],
     "macOS": {
       "frameworks": [],
-      "infoPlist": "Info.plist",
-      "signing": {
-        "identity": "-"
-      }
+      "infoPlist": "Info.plist"
     }
   }
 }
