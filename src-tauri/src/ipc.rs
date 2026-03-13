@@ -209,7 +209,9 @@ async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
 
         _ => IpcResponse {
             ok: false,
-            message: format!("Unknown command: {command}. Available: status, list, connect <name>, disconnect"),
+            message: format!(
+                "Unknown command: {command}. Available: status, list, connect <name>, disconnect"
+            ),
             data: None,
         },
     }

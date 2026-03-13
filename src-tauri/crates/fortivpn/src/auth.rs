@@ -111,7 +111,11 @@ pub fn parse_vpn_config_xml(xml: &str) -> Result<VpnConfig, FortiError> {
                 current_text.clear();
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(FortiError::AllocationFailed(format!("XML parse error: {e}"))),
+            Err(e) => {
+                return Err(FortiError::AllocationFailed(format!(
+                    "XML parse error: {e}"
+                )))
+            }
             _ => {}
         }
     }
@@ -125,7 +129,14 @@ pub fn parse_vpn_config_xml(xml: &str) -> Result<VpnConfig, FortiError> {
     })
 }
 
-fn build_request(method: &str, path: &str, host: &str, port: u16, cookie: &str, body: &str) -> String {
+fn build_request(
+    method: &str,
+    path: &str,
+    host: &str,
+    port: u16,
+    cookie: &str,
+    body: &str,
+) -> String {
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: {host}:{port}\r\n\
@@ -152,7 +163,9 @@ fn read_response<R: Read>(stream: &mut R) -> Result<String, FortiError> {
     let mut response = String::new();
     loop {
         let n = stream.read(&mut buf).map_err(FortiError::Io)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         response.push_str(&String::from_utf8_lossy(&buf[..n]));
         if response.contains("\r\n\r\n") {
             break;
@@ -183,17 +196,19 @@ pub(crate) fn build_tls_config(trusted_cert: &str) -> Arc<rustls::ClientConfig> 
 }
 
 /// Create a sync TLS connection to the FortiGate gateway.
-pub(crate) fn tls_connect(host: &str, port: u16, trusted_cert: &str) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, FortiError> {
+pub(crate) fn tls_connect(
+    host: &str,
+    port: u16,
+    trusted_cert: &str,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, FortiError> {
     let addr = format!("{host}:{port}");
     let socket_addr = addr
         .to_socket_addrs()
         .map_err(|e| FortiError::GatewayUnreachable(format!("DNS resolve {host}: {e}")))?
         .next()
         .ok_or_else(|| FortiError::GatewayUnreachable(format!("No addresses for {host}")))?;
-    let tcp = TcpStream::connect_timeout(
-        &socket_addr,
-        Duration::from_secs(10),
-    ).map_err(|e| FortiError::GatewayUnreachable(format!("{e}")))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
+        .map_err(|e| FortiError::GatewayUnreachable(format!("{e}")))?;
     tcp.set_nodelay(true).ok();
 
     let config = build_tls_config(trusted_cert);
@@ -368,7 +383,14 @@ mod tests {
     #[test]
     fn test_build_request_post_with_body() {
         let body = "username=test&password=123";
-        let req = build_request("POST", "/remote/logincheck", "gw.example.com", 443, "", body);
+        let req = build_request(
+            "POST",
+            "/remote/logincheck",
+            "gw.example.com",
+            443,
+            "",
+            body,
+        );
         assert!(req.contains("POST /remote/logincheck HTTP/1.1\r\n"));
         assert!(req.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
         assert!(req.contains(&format!("Content-Length: {}\r\n", body.len())));
@@ -535,7 +557,8 @@ mod tests {
 
     #[test]
     fn test_build_tls_config_with_pinned_cert() {
-        let config = build_tls_config("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        let config =
+            build_tls_config("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
         assert!(std::sync::Arc::strong_count(&config) >= 1);
     }
 
@@ -545,9 +568,13 @@ mod tests {
         let hash = cert_sha256_hex(&cert_data);
         let verifier = CertPinVerifier { pinned_hash: hash };
         let cert_der = rustls::pki_types::CertificateDer::from(cert_data);
-        let server_name = rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
+        let server_name =
+            rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
         let result = verifier.verify_server_cert(
-            &cert_der, &[], &server_name, &[],
+            &cert_der,
+            &[],
+            &server_name,
+            &[],
             rustls::pki_types::UnixTime::now(),
         );
         assert!(result.is_ok());
@@ -556,12 +583,17 @@ mod tests {
     #[test]
     fn test_cert_pin_verifier_mismatching_hash() {
         let verifier = CertPinVerifier {
-            pinned_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            pinned_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         };
         let cert_der = rustls::pki_types::CertificateDer::from(vec![1, 2, 3]);
-        let server_name = rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
+        let server_name =
+            rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
         let result = verifier.verify_server_cert(
-            &cert_der, &[], &server_name, &[],
+            &cert_der,
+            &[],
+            &server_name,
+            &[],
             rustls::pki_types::UnixTime::now(),
         );
         assert!(result.is_err());
@@ -573,11 +605,17 @@ mod tests {
     fn test_cert_pin_verifier_case_insensitive() {
         let cert_data = vec![10, 20, 30];
         let hash = cert_sha256_hex(&cert_data);
-        let verifier = CertPinVerifier { pinned_hash: hash.to_uppercase() };
+        let verifier = CertPinVerifier {
+            pinned_hash: hash.to_uppercase(),
+        };
         let cert_der = rustls::pki_types::CertificateDer::from(cert_data);
-        let server_name = rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
+        let server_name =
+            rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
         let result = verifier.verify_server_cert(
-            &cert_der, &[], &server_name, &[],
+            &cert_der,
+            &[],
+            &server_name,
+            &[],
             rustls::pki_types::UnixTime::now(),
         );
         assert!(result.is_ok());
@@ -586,7 +624,9 @@ mod tests {
     #[test]
     fn test_cert_pin_verifier_supported_schemes() {
         use rustls::client::danger::ServerCertVerifier;
-        let verifier = CertPinVerifier { pinned_hash: "test".to_string() };
+        let verifier = CertPinVerifier {
+            pinned_hash: "test".to_string(),
+        };
         let schemes = verifier.supported_verify_schemes();
         assert!(!schemes.is_empty());
     }
@@ -684,7 +724,9 @@ mod tests {
 
     #[test]
     fn test_cert_pin_verifier_debug() {
-        let verifier = CertPinVerifier { pinned_hash: "abc123".to_string() };
+        let verifier = CertPinVerifier {
+            pinned_hash: "abc123".to_string(),
+        };
         let debug = format!("{:?}", verifier);
         assert!(debug.contains("CertPinVerifier"));
         assert!(debug.contains("abc123"));
@@ -695,6 +737,9 @@ mod tests {
         let hash = cert_sha256_hex(b"");
         assert_eq!(hash.len(), 64);
         // SHA-256 of empty string is a well-known value
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

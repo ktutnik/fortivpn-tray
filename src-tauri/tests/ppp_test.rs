@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use fortivpn::ppp::*;
+use std::net::Ipv4Addr;
 
 // === PppPacket tests ===
 
@@ -36,10 +36,7 @@ fn test_ppp_packet_encode_with_data() {
 
 #[test]
 fn test_ppp_packet_decode() {
-    let bytes = [
-        0xC0, 0x21, 0x01, 0x05, 0x00, 0x08,
-        0x01, 0x04, 0x05, 0x4A,
-    ];
+    let bytes = [0xC0, 0x21, 0x01, 0x05, 0x00, 0x08, 0x01, 0x04, 0x05, 0x4A];
     let pkt = PppPacket::decode(&bytes).unwrap();
     assert_eq!(pkt.protocol, LCP_PROTOCOL);
     assert_eq!(pkt.code, LCP_CONFIGURE_REQUEST);

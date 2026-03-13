@@ -172,17 +172,15 @@ impl IpcpOption {
             return Err(format!("IPCP option length invalid: type={typ}, len={len}"));
         }
         let opt = match typ {
-            IPCP_OPT_IP_ADDRESS if len == 6 => {
-                IpcpOption::IpAddress(std::net::Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]))
-            }
-            IPCP_OPT_PRIMARY_DNS if len == 6 => {
-                IpcpOption::PrimaryDns(std::net::Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]))
-            }
-            IPCP_OPT_SECONDARY_DNS if len == 6 => {
-                IpcpOption::SecondaryDns(std::net::Ipv4Addr::new(
-                    bytes[2], bytes[3], bytes[4], bytes[5],
-                ))
-            }
+            IPCP_OPT_IP_ADDRESS if len == 6 => IpcpOption::IpAddress(std::net::Ipv4Addr::new(
+                bytes[2], bytes[3], bytes[4], bytes[5],
+            )),
+            IPCP_OPT_PRIMARY_DNS if len == 6 => IpcpOption::PrimaryDns(std::net::Ipv4Addr::new(
+                bytes[2], bytes[3], bytes[4], bytes[5],
+            )),
+            IPCP_OPT_SECONDARY_DNS if len == 6 => IpcpOption::SecondaryDns(
+                std::net::Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]),
+            ),
             _ => IpcpOption::Unknown(typ, bytes[2..len].to_vec()),
         };
         Ok((opt, len))

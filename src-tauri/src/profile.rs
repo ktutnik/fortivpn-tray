@@ -158,8 +158,22 @@ mod tests {
     fn make_test_store() -> ProfileStore {
         ProfileStore {
             profiles: vec![
-                VpnProfile { id: "p1".into(), name: "VPN1".into(), host: "h1".into(), port: 443, username: "u1".into(), trusted_cert: "".into() },
-                VpnProfile { id: "p2".into(), name: "VPN2".into(), host: "h2".into(), port: 8443, username: "u2".into(), trusted_cert: "".into() },
+                VpnProfile {
+                    id: "p1".into(),
+                    name: "VPN1".into(),
+                    host: "h1".into(),
+                    port: 443,
+                    username: "u1".into(),
+                    trusted_cert: "".into(),
+                },
+                VpnProfile {
+                    id: "p2".into(),
+                    name: "VPN2".into(),
+                    host: "h2".into(),
+                    port: 8443,
+                    username: "u2".into(),
+                    trusted_cert: "".into(),
+                },
             ],
         }
     }
@@ -181,8 +195,12 @@ mod tests {
     #[test]
     fn test_vpn_profile_clone() {
         let p = VpnProfile {
-            id: "id".into(), name: "name".into(), host: "host".into(),
-            port: 443, username: "user".into(), trusted_cert: "cert".into(),
+            id: "id".into(),
+            name: "name".into(),
+            host: "host".into(),
+            port: 443,
+            username: "user".into(),
+            trusted_cert: "cert".into(),
         };
         let cloned = p.clone();
         assert_eq!(cloned.id, "id");
@@ -192,8 +210,12 @@ mod tests {
     #[test]
     fn test_vpn_profile_debug() {
         let p = VpnProfile {
-            id: "id".into(), name: "name".into(), host: "host".into(),
-            port: 443, username: "user".into(), trusted_cert: "cert".into(),
+            id: "id".into(),
+            name: "name".into(),
+            host: "host".into(),
+            port: 443,
+            username: "user".into(),
+            trusted_cert: "cert".into(),
         };
         let debug = format!("{:?}", p);
         assert!(debug.contains("VpnProfile"));

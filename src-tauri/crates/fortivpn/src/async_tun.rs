@@ -52,7 +52,11 @@ impl AsyncRead for AsyncTunFd {
             let fd = self.inner.as_raw_fd();
             let unfilled = buf.initialize_unfilled();
             let ret = unsafe {
-                libc::read(fd, unfilled.as_mut_ptr() as *mut libc::c_void, unfilled.len())
+                libc::read(
+                    fd,
+                    unfilled.as_mut_ptr() as *mut libc::c_void,
+                    unfilled.len(),
+                )
             };
 
             if ret >= 0 {
@@ -84,9 +88,7 @@ impl AsyncWrite for AsyncTunFd {
             };
 
             let fd = self.inner.as_raw_fd();
-            let ret = unsafe {
-                libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len())
-            };
+            let ret = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
 
             if ret >= 0 {
                 return Poll::Ready(Ok(ret as usize));

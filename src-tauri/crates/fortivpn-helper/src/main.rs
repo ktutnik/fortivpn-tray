@@ -188,7 +188,11 @@ fn handle_delete_route(msg: &serde_json::Value, writer: &mut UnixStream) {
 fn handle_configure_dns(msg: &serde_json::Value, writer: &mut UnixStream) {
     let servers: Vec<String> = msg["servers"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let search_domain = msg["search_domain"].as_str();
 
@@ -197,10 +201,7 @@ fn handle_configure_dns(msg: &serde_json::Value, writer: &mut UnixStream) {
         return;
     }
 
-    let mut script = format!(
-        "d.init\nd.add ServerAddresses * {}\n",
-        servers.join(" ")
-    );
+    let mut script = format!("d.init\nd.add ServerAddresses * {}\n", servers.join(" "));
     if let Some(domain) = search_domain {
         script.push_str(&format!("d.add SearchDomains * {domain}\n"));
     }
@@ -262,8 +263,8 @@ fn run_scutil(script: &str) -> Result<(), String> {
 /// Send a file descriptor over a Unix socket using SCM_RIGHTS.
 fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), String> {
     use libc::{
-        c_void, cmsghdr, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN,
-        CMSG_SPACE, SCM_RIGHTS, SOL_SOCKET,
+        c_void, cmsghdr, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_SPACE,
+        SCM_RIGHTS, SOL_SOCKET,
     };
     use std::mem;
     use std::ptr;
@@ -298,10 +299,7 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), String> {
 
         let ret = sendmsg(socket_fd, &msg, 0);
         if ret < 0 {
-            return Err(format!(
-                "sendmsg: {}",
-                std::io::Error::last_os_error()
-            ));
+            return Err(format!("sendmsg: {}", std::io::Error::last_os_error()));
         }
     }
 

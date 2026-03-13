@@ -20,7 +20,9 @@ pub fn decode_frame_header(header: &[u8; HEADER_SIZE]) -> Result<usize, String> 
         if &header[..5] == b"HTTP/" {
             return Err("Tunnel rejected: gateway returned HTTP error".to_string());
         }
-        return Err(format!("Invalid magic: expected 0x{MAGIC:04X}, got 0x{magic:04X}"));
+        return Err(format!(
+            "Invalid magic: expected 0x{MAGIC:04X}, got 0x{magic:04X}"
+        ));
     }
     let payload_size = u16::from_be_bytes([header[4], header[5]]) as usize;
     Ok(payload_size)
@@ -28,18 +30,30 @@ pub fn decode_frame_header(header: &[u8; HEADER_SIZE]) -> Result<usize, String> 
 
 pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>, String> {
     let mut header = [0u8; HEADER_SIZE];
-    reader.read_exact(&mut header).await.map_err(|e| format!("Read header: {e}"))?;
+    reader
+        .read_exact(&mut header)
+        .await
+        .map_err(|e| format!("Read header: {e}"))?;
     let payload_size = decode_frame_header(&header)?;
     let mut payload = vec![0u8; payload_size];
     if payload_size > 0 {
-        reader.read_exact(&mut payload).await.map_err(|e| format!("Read payload: {e}"))?;
+        reader
+            .read_exact(&mut payload)
+            .await
+            .map_err(|e| format!("Read payload: {e}"))?;
     }
     Ok(payload)
 }
 
-pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8]) -> Result<(), String> {
+pub async fn write_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+) -> Result<(), String> {
     let frame = encode_frame(payload);
-    writer.write_all(&frame).await.map_err(|e| format!("Write frame: {e}"))?;
+    writer
+        .write_all(&frame)
+        .await
+        .map_err(|e| format!("Write frame: {e}"))?;
     writer.flush().await.map_err(|e| format!("Flush: {e}"))?;
     Ok(())
 }

@@ -71,10 +71,7 @@ fn main() {
                     if let Some(status) = data.get("status") {
                         // Status response
                         let s = status.as_str().unwrap_or("unknown");
-                        let profile = data
-                            .get("profile")
-                            .and_then(|p| p.as_str())
-                            .unwrap_or("");
+                        let profile = data.get("profile").and_then(|p| p.as_str()).unwrap_or("");
                         if profile.is_empty() {
                             println!("VPN: {s}");
                         } else {

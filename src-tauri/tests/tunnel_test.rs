@@ -1,4 +1,6 @@
-use fortivpn::tunnel::{encode_frame, decode_frame_header, read_frame, write_frame, MAGIC, HEADER_SIZE};
+use fortivpn::tunnel::{
+    decode_frame_header, encode_frame, read_frame, write_frame, HEADER_SIZE, MAGIC,
+};
 
 // === encode_frame tests ===
 

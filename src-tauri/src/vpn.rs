@@ -1,7 +1,7 @@
-use fortivpn::helper::HelperClient;
-use fortivpn::VpnSession;
 use crate::keychain;
 use crate::profile::VpnProfile;
+use fortivpn::helper::HelperClient;
+use fortivpn::VpnSession;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VpnStatus {

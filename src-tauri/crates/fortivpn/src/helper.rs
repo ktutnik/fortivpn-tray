@@ -22,7 +22,8 @@ pub struct HelperClient {
 impl HelperClient {
     /// Launch the helper via osascript and establish a connection.
     pub fn spawn() -> Result<Self, FortiError> {
-        let socket_path = std::env::temp_dir().join(format!("fortivpn-helper-{}.sock", std::process::id()));
+        let socket_path =
+            std::env::temp_dir().join(format!("fortivpn-helper-{}.sock", std::process::id()));
 
         // Clean up any stale socket
         let _ = std::fs::remove_file(&socket_path);
@@ -91,7 +92,8 @@ impl HelperClient {
             }
         };
 
-        let writer = stream.try_clone()
+        let writer = stream
+            .try_clone()
             .map_err(|e| FortiError::TunDeviceError(format!("Clone stream: {e}")))?;
         let reader = BufReader::new(stream);
 
@@ -123,10 +125,7 @@ impl HelperClient {
 
         // Read the JSON response
         let resp = self.read_response()?;
-        let tun_name = resp["tun_name"]
-            .as_str()
-            .unwrap_or("utun?")
-            .to_string();
+        let tun_name = resp["tun_name"].as_str().unwrap_or("utun?").to_string();
 
         Ok((fd, tun_name))
     }
@@ -228,8 +227,8 @@ impl Drop for HelperClient {
 /// Receive a file descriptor over a Unix socket using SCM_RIGHTS.
 fn recv_fd(stream: &std::os::unix::net::UnixStream) -> Result<RawFd, String> {
     use libc::{
-        c_void, cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_SPACE,
-        SCM_RIGHTS, SOL_SOCKET,
+        c_void, cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_SPACE, SCM_RIGHTS,
+        SOL_SOCKET,
     };
     use std::mem;
     use std::os::unix::io::AsRawFd;
@@ -276,7 +275,9 @@ fn recv_fd(stream: &std::os::unix::net::UnixStream) -> Result<RawFd, String> {
 
 /// Wrap a raw tun fd into a tokio-compatible async reader/writer.
 /// On macOS, utun sockets are kernel control sockets that support read/write.
-pub fn async_tun_from_fd(fd: RawFd) -> Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>, FortiError> {
+pub fn async_tun_from_fd(
+    fd: RawFd,
+) -> Result<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>, FortiError> {
     use std::os::fd::OwnedFd;
 
     // Set non-blocking

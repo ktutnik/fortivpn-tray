@@ -112,9 +112,10 @@ pub async fn open_tunnel(
                             // Check for HTTP error
                             let resp = String::from_utf8_lossy(&header_buf);
                             if resp.contains("403") || resp.contains("401") {
-                                return Err(FortiError::TunnelRejected(
-                                    format!("Gateway rejected tunnel: {}", resp.lines().next().unwrap_or("")),
-                                ));
+                                return Err(FortiError::TunnelRejected(format!(
+                                    "Gateway rejected tunnel: {}",
+                                    resp.lines().next().unwrap_or("")
+                                )));
                             }
                             break;
                         }
@@ -135,7 +136,9 @@ pub async fn open_tunnel(
             }
         }
         Ok(Err(e)) => {
-            return Err(FortiError::TunnelRejected(format!("Read tunnel response: {e}")));
+            return Err(FortiError::TunnelRejected(format!(
+                "Read tunnel response: {e}"
+            )));
         }
         Err(_) => {
             // Timeout — gateway entered binary mode without sending anything.
@@ -198,9 +201,9 @@ where
             LCP_PROTOCOL => match pkt.code {
                 LCP_CONFIGURE_REQUEST => {
                     let ack = lcp.handle_configure_request(pkt.identifier, &pkt.data);
-                    write_frame(writer, &ack.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Send LCP ack: {e}")))?;
+                    write_frame(writer, &ack.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Send LCP ack: {e}"))
+                    })?;
                     lcp_peer_acked = true;
                 }
                 LCP_CONFIGURE_ACK => {
@@ -211,33 +214,33 @@ where
                     lcp.handle_configure_nak(&pkt.data);
                     // Resend with updated values
                     let req = lcp.build_configure_request(id_counter);
-                    write_frame(writer, &req.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Resend LCP: {e}")))?;
+                    write_frame(writer, &req.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Resend LCP: {e}"))
+                    })?;
                     id_counter = id_counter.wrapping_add(1);
                 }
                 LCP_CONFIGURE_REJECT => {
                     // Accept rejection — remove rejected options and resend
                     let req = lcp.build_configure_request(id_counter);
-                    write_frame(writer, &req.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Resend LCP: {e}")))?;
+                    write_frame(writer, &req.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Resend LCP: {e}"))
+                    })?;
                     id_counter = id_counter.wrapping_add(1);
                 }
                 LCP_ECHO_REQUEST => {
                     let reply = lcp.build_echo_reply(pkt.identifier);
-                    write_frame(writer, &reply.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Send echo reply: {e}")))?;
+                    write_frame(writer, &reply.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Send echo reply: {e}"))
+                    })?;
                 }
                 _ => {}
             },
             IPCP_PROTOCOL => match pkt.code {
                 LCP_CONFIGURE_REQUEST => {
                     let ack = ipcp.handle_configure_request(pkt.identifier, &pkt.data);
-                    write_frame(writer, &ack.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Send IPCP ack: {e}")))?;
+                    write_frame(writer, &ack.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Send IPCP ack: {e}"))
+                    })?;
                     ipcp_peer_acked = true;
                 }
                 LCP_CONFIGURE_ACK => {
@@ -248,9 +251,9 @@ where
                     ipcp.handle_configure_nak(&pkt.data);
                     // Resend with assigned values
                     let req = ipcp.build_configure_request(id_counter);
-                    write_frame(writer, &req.encode())
-                        .await
-                        .map_err(|e| FortiError::PppNegotiationFailed(format!("Resend IPCP: {e}")))?;
+                    write_frame(writer, &req.encode()).await.map_err(|e| {
+                        FortiError::PppNegotiationFailed(format!("Resend IPCP: {e}"))
+                    })?;
                     id_counter = id_counter.wrapping_add(1);
                 }
                 _ => {}
@@ -314,8 +317,15 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         let alive = alive.clone();
         let outbound_tx = outbound_tx.clone();
         tokio::spawn(async move {
-            tunnel_reader_loop(tls_reader, tun_writer, outbound_tx, shutdown, alive, magic_number)
-                .await;
+            tunnel_reader_loop(
+                tls_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown,
+                alive,
+                magic_number,
+            )
+            .await;
         })
     };
 
@@ -503,7 +513,7 @@ async fn tun_reader_loop<R: AsyncReadExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tunnel::{write_frame, read_frame};
+    use crate::tunnel::{read_frame, write_frame};
     use std::sync::atomic::Ordering;
     use tokio::sync::{mpsc, Notify};
 
@@ -601,7 +611,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x12345678).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x12345678,
+            )
+            .await;
         });
 
         // Send an IP packet through the tunnel (protocol 0x0021 = IP)
@@ -613,10 +631,10 @@ mod tests {
 
         // Read from tun side - should have PI header (on macOS) + IP data
         let mut buf = vec![0u8; 256];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            tun_reader.read(&mut buf)
-        ).await.unwrap().unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), tun_reader.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(n > 0);
         // The IP data should be in the output (possibly with PI header prefix)
         let output = &buf[..n];
@@ -652,7 +670,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, magic).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                magic,
+            )
+            .await;
         });
 
         // Send LCP Echo-Request
@@ -662,13 +688,16 @@ mod tests {
             identifier: 42,
             data: 0xDEADBEEFu32.to_be_bytes().to_vec(),
         };
-        write_frame(&mut mock_writer, &echo_req.encode()).await.unwrap();
+        write_frame(&mut mock_writer, &echo_req.encode())
+            .await
+            .unwrap();
 
         // Should receive LCP Echo-Reply on outbound channel
-        let reply_data = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            outbound_rx.recv()
-        ).await.unwrap().unwrap();
+        let reply_data =
+            tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
         let reply = PppPacket::decode(&reply_data).unwrap();
         assert_eq!(reply.protocol, LCP_PROTOCOL);
@@ -728,10 +757,10 @@ mod tests {
         mock_writer.write_all(&packet).await.unwrap();
 
         // Should get the proper packet as a PPP frame
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            outbound_rx.recv()
-        ).await.unwrap().unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(frame.len() > 2); // protocol + data
 
         shutdown.notify_waiters();
@@ -754,7 +783,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x11111111).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x11111111,
+            )
+            .await;
         });
 
         // Send LCP Echo-Reply
@@ -764,7 +801,9 @@ mod tests {
             identifier: 1,
             data: 0x22222222u32.to_be_bytes().to_vec(),
         };
-        write_frame(&mut mock_writer, &echo_reply.encode()).await.unwrap();
+        write_frame(&mut mock_writer, &echo_reply.encode())
+            .await
+            .unwrap();
 
         // Give it time to process
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -792,7 +831,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x11111111).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x11111111,
+            )
+            .await;
         });
 
         // Send LCP Terminate-Request
@@ -805,10 +852,10 @@ mod tests {
         write_frame(&mut mock_writer, &term.encode()).await.unwrap();
 
         // Should receive Terminate-Ack
-        let ack_data = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            outbound_rx.recv()
-        ).await.unwrap().unwrap();
+        let ack_data = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         let ack = PppPacket::decode(&ack_data).unwrap();
         assert_eq!(ack.code, LCP_TERMINATE_ACK);
@@ -835,7 +882,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x11111111).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x11111111,
+            )
+            .await;
         });
 
         // Send a short frame (< 4 bytes payload) - should be skipped
@@ -867,7 +922,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x11111111).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x11111111,
+            )
+            .await;
         });
 
         // Send unknown protocol (0xFFFF)
@@ -917,10 +980,10 @@ mod tests {
         }
 
         // Should receive PPP-wrapped IP packet on outbound channel
-        let ppp_frame = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            outbound_rx.recv()
-        ).await.unwrap().unwrap();
+        let ppp_frame = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         // First 2 bytes should be IP protocol
         assert_eq!(&ppp_frame[..2], &IP_PROTOCOL.to_be_bytes());
@@ -970,7 +1033,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_reader_loop(tunnel_reader, tun_writer, outbound_tx, shutdown_clone, alive_clone, 0x11111111).await;
+            tunnel_reader_loop(
+                tunnel_reader,
+                tun_writer,
+                outbound_tx,
+                shutdown_clone,
+                alive_clone,
+                0x11111111,
+            )
+            .await;
         });
 
         // Drop the mock tunnel to simulate connection loss

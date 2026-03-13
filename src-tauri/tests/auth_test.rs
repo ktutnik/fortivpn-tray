@@ -3,7 +3,8 @@ use std::net::Ipv4Addr;
 
 #[test]
 fn test_extract_cookie_from_headers() {
-    let response = "HTTP/1.1 200 OK\r\nSet-Cookie: SVPNCOOKIE=abc123def; path=/\r\nContent-Length: 0\r\n\r\n";
+    let response =
+        "HTTP/1.1 200 OK\r\nSet-Cookie: SVPNCOOKIE=abc123def; path=/\r\nContent-Length: 0\r\n\r\n";
     let cookie = extract_cookie(response).unwrap();
     assert_eq!(cookie, "abc123def");
 }
@@ -35,7 +36,10 @@ fn test_parse_vpn_config_xml() {
     assert_eq!(config.dns_servers[0], Ipv4Addr::new(10, 0, 0, 1));
     assert_eq!(config.search_domain, Some("mims.local".to_string()));
     assert_eq!(config.routes.len(), 2);
-    assert_eq!(config.routes[0], (Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
+    assert_eq!(
+        config.routes[0],
+        (Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0))
+    );
 }
 
 #[test]

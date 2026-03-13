@@ -164,7 +164,9 @@ fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !(action == "delete" && stderr.contains("not in table")) {
-                return Err(FortiError::RoutingError(format!("route {action} {dest}: {stderr}")));
+                return Err(FortiError::RoutingError(format!(
+                    "route {action} {dest}: {stderr}"
+                )));
             }
         }
     }
@@ -182,7 +184,9 @@ fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> 
             .map_err(|e| FortiError::RoutingError(format!("route {action}: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FortiError::RoutingError(format!("route {action} {dest}: {stderr}")));
+            return Err(FortiError::RoutingError(format!(
+                "route {action} {dest}: {stderr}"
+            )));
         }
     }
 
@@ -203,7 +207,10 @@ fn parse_gateway_output(stdout: &str) -> Option<Ipv4Addr> {
 fn get_default_gateway() -> Option<Ipv4Addr> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("route").args(["-n", "get", "default"]).output().ok()?;
+        let output = Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()
+            .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         return parse_gateway_output(&stdout);
     }
@@ -216,10 +223,7 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
 
 fn build_dns_script(dns_servers: &[Ipv4Addr], search_domain: &Option<String>) -> String {
     let dns_ips: Vec<String> = dns_servers.iter().map(|ip| ip.to_string()).collect();
-    let mut script = format!(
-        "d.init\nd.add ServerAddresses * {}\n",
-        dns_ips.join(" ")
-    );
+    let mut script = format!("d.init\nd.add ServerAddresses * {}\n", dns_ips.join(" "));
     if let Some(ref domain) = search_domain {
         script.push_str(&format!("d.add SearchDomains * {domain}\n"));
     }
@@ -251,7 +255,9 @@ fn configure_dns(tun_name: &str, config: &VpnConfig) -> Result<(), FortiError> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FortiError::RoutingError(format!("scutil DNS failed: {stderr}")));
+            return Err(FortiError::RoutingError(format!(
+                "scutil DNS failed: {stderr}"
+            )));
         }
     }
 
@@ -408,7 +414,10 @@ mod tests {
     #[test]
     fn test_parse_gateway_output_typical() {
         let output = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
-        assert_eq!(parse_gateway_output(output), Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(
+            parse_gateway_output(output),
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        );
     }
 
     #[test]
@@ -431,7 +440,10 @@ mod tests {
     #[test]
     fn test_parse_gateway_output_extra_whitespace() {
         let output = "    gateway:   10.0.0.1  \n";
-        assert_eq!(parse_gateway_output(output), Some(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            parse_gateway_output(output),
+            Some(Ipv4Addr::new(10, 0, 0, 1))
+        );
     }
 
     // build_dns_script tests
@@ -471,7 +483,8 @@ mod tests {
     #[test]
     fn test_route_manager_restore_clears_state() {
         let mut rm = RouteManager::new(Ipv4Addr::new(1, 2, 3, 4), "utun5");
-        rm.installed_routes.push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
+        rm.installed_routes
+            .push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
         rm.full_tunnel = false;
         // restore will try to run_route which will fail, but state should still be cleared
         rm.restore();
@@ -491,7 +504,8 @@ mod tests {
     fn test_route_manager_drop_calls_restore() {
         let mut rm = RouteManager::new(Ipv4Addr::new(1, 2, 3, 4), "utun5");
         rm.full_tunnel = true;
-        rm.installed_routes.push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
+        rm.installed_routes
+            .push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
         drop(rm);
         // If Drop panicked, this test would fail
     }
@@ -509,8 +523,10 @@ mod tests {
         let mut rm = RouteManager::new(Ipv4Addr::new(1, 2, 3, 4), "utun5");
         rm.full_tunnel = true;
         rm.original_gateway = Some(Ipv4Addr::new(192, 168, 1, 1));
-        rm.installed_routes.push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
-        rm.installed_routes.push((Ipv4Addr::new(172, 16, 0, 0), Ipv4Addr::new(255, 240, 0, 0)));
+        rm.installed_routes
+            .push((Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(255, 0, 0, 0)));
+        rm.installed_routes
+            .push((Ipv4Addr::new(172, 16, 0, 0), Ipv4Addr::new(255, 240, 0, 0)));
         rm.restore();
         assert!(rm.installed_routes.is_empty());
         assert!(!rm.full_tunnel);
@@ -528,7 +544,10 @@ mod tests {
     fn test_parse_gateway_output_multiple_gateways() {
         // Should return the first gateway found
         let output = "    gateway: 10.0.0.1\n    gateway: 10.0.0.2\n";
-        assert_eq!(parse_gateway_output(output), Some(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            parse_gateway_output(output),
+            Some(Ipv4Addr::new(10, 0, 0, 1))
+        );
     }
 
     #[test]

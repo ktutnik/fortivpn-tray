@@ -1,11 +1,11 @@
+pub mod async_tun;
 pub mod auth;
 pub mod bridge;
-pub mod tunnel;
-pub mod ppp;
-pub mod tun;
-pub mod routing;
 pub mod helper;
-pub mod async_tun;
+pub mod ppp;
+pub mod routing;
+pub mod tun;
+pub mod tunnel;
 
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -138,10 +138,7 @@ impl VpnSession {
                 _ => Ipv4Addr::UNSPECIFIED,
             })
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
-        let mut route_manager = routing::RouteManager::new(
-            gateway_ip,
-            &tun_name,
-        );
+        let mut route_manager = routing::RouteManager::new(gateway_ip, &tun_name);
         route_manager.configure_via_helper(&config, helper_client)?;
 
         Ok(Self {
@@ -182,10 +179,9 @@ impl VpnSession {
         let port = self.port;
         let cookie = self.cookie.clone();
         let trusted_cert = self.trusted_cert.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            send_logout(&host, port, &cookie, &trusted_cert)
-        })
-        .await;
+        let _ =
+            tokio::task::spawn_blocking(move || send_logout(&host, port, &cookie, &trusted_cert))
+                .await;
     }
 }
 
@@ -412,14 +408,38 @@ mod tests {
     fn test_forti_error_display_all_string_variants() {
         // Verify all string-carrying variants format correctly
         let cases: Vec<(FortiError, &str)> = vec![
-            (FortiError::GatewayUnreachable("dns failed".into()), "Gateway unreachable: dns failed"),
-            (FortiError::CertificateNotTrusted("expired".into()), "Certificate not trusted: expired"),
-            (FortiError::AllocationFailed("full".into()), "VPN allocation failed: full"),
-            (FortiError::TunnelRejected("denied".into()), "Tunnel rejected: denied"),
-            (FortiError::PppNegotiationFailed("nak".into()), "PPP negotiation failed: nak"),
-            (FortiError::TunDeviceError("busy".into()), "Tun device error: busy"),
-            (FortiError::RoutingError("no route".into()), "Routing error: no route"),
-            (FortiError::Disconnected("reset".into()), "Disconnected: reset"),
+            (
+                FortiError::GatewayUnreachable("dns failed".into()),
+                "Gateway unreachable: dns failed",
+            ),
+            (
+                FortiError::CertificateNotTrusted("expired".into()),
+                "Certificate not trusted: expired",
+            ),
+            (
+                FortiError::AllocationFailed("full".into()),
+                "VPN allocation failed: full",
+            ),
+            (
+                FortiError::TunnelRejected("denied".into()),
+                "Tunnel rejected: denied",
+            ),
+            (
+                FortiError::PppNegotiationFailed("nak".into()),
+                "PPP negotiation failed: nak",
+            ),
+            (
+                FortiError::TunDeviceError("busy".into()),
+                "Tun device error: busy",
+            ),
+            (
+                FortiError::RoutingError("no route".into()),
+                "Routing error: no route",
+            ),
+            (
+                FortiError::Disconnected("reset".into()),
+                "Disconnected: reset",
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(err.to_string(), expected);

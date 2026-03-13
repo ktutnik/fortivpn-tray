@@ -131,8 +131,7 @@ fn build_tray_menu(
                 VpnStatus::Disconnecting => "Status: Disconnecting...".to_string(),
                 _ => unreachable!(),
             };
-            let status_item =
-                MenuItem::with_id(app, "status", &status_text, false, None::<&str>)?;
+            let status_item = MenuItem::with_id(app, "status", &status_text, false, None::<&str>)?;
             menu.append(&status_item)?;
         }
     }
@@ -215,7 +214,9 @@ fn save_profile(
     vpn: tauri::State<'_, VpnState>,
     profile: ProfileInput,
 ) -> Result<String, String> {
-    let id = profile.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = profile
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let vp = VpnProfile {
         id: id.clone(),
         name: profile.name,
@@ -278,12 +279,16 @@ fn open_settings_window(app: &tauri::AppHandle) {
     }
 
     // Create new settings window
-    let _window = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("/index.html".into()))
-        .title("FortiVPN Settings")
-        .inner_size(480.0, 520.0)
-        .resizable(false)
-        .center()
-        .build();
+    let _window = tauri::WebviewWindowBuilder::new(
+        app,
+        "settings",
+        tauri::WebviewUrl::App("/index.html".into()),
+    )
+    .title("FortiVPN Settings")
+    .inner_size(480.0, 520.0)
+    .resizable(false)
+    .center()
+    .build();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -320,7 +325,8 @@ pub fn run() {
             ipc::start_ipc_server(app.handle().clone());
 
             // Build tray icon
-            let disconnected_icon = Image::from_bytes(include_bytes!("../icons/vpn-disconnected.png"))?;
+            let disconnected_icon =
+                Image::from_bytes(include_bytes!("../icons/vpn-disconnected.png"))?;
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(disconnected_icon)
                 .icon_as_template(true)
@@ -580,7 +586,8 @@ mod tests {
     // ProfileInput deserialization tests
     #[test]
     fn test_profile_input_deserialization_with_id() {
-        let json = r#"{"id":"x1","name":"VPN","host":"h","port":443,"username":"u","trusted_cert":"c"}"#;
+        let json =
+            r#"{"id":"x1","name":"VPN","host":"h","port":443,"username":"u","trusted_cert":"c"}"#;
         let input: ProfileInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.id, Some("x1".to_string()));
         assert_eq!(input.name, "VPN");
@@ -596,7 +603,8 @@ mod tests {
 
     #[test]
     fn test_profile_input_null_id() {
-        let json = r#"{"id":null,"name":"VPN","host":"h","port":443,"username":"u","trusted_cert":"c"}"#;
+        let json =
+            r#"{"id":null,"name":"VPN","host":"h","port":443,"username":"u","trusted_cert":"c"}"#;
         let input: ProfileInput = serde_json::from_str(json).unwrap();
         assert!(input.id.is_none());
     }
