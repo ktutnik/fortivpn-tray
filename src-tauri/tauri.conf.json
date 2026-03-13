@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fortivpn-tray",
+  "productName": "FortiVPN Tray",
   "version": "0.1.0",
   "identifier": "com.ktutnik.fortivpn-tray",
   "build": {
@@ -25,7 +25,10 @@
     ],
     "macOS": {
       "frameworks": [],
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signing": {
+        "identity": "-"
+      }
     }
   }
 }
