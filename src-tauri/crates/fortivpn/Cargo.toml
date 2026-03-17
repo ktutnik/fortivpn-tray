@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "net", "rt"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "net", "rt", "time"] }
 rustls = "0.23"
 webpki-roots = "1"
 tokio-rustls = "0.26"

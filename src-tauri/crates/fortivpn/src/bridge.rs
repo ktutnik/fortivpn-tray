@@ -287,6 +287,7 @@ where
 pub struct BridgeHandle {
     pub tasks: Vec<JoinHandle<()>>,
     pub alive: Arc<AtomicBool>,
+    pub event_rx: tokio::sync::watch::Receiver<crate::VpnEvent>,
 }
 
 /// Start the bidirectional bridge between TLS tunnel and tun device.
@@ -298,6 +299,8 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
     magic_number: u32,
 ) -> BridgeHandle {
     let alive = Arc::new(AtomicBool::new(true));
+    let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+    let event_tx = Arc::new(event_tx);
     let (tls_reader, tls_writer) = split(tls_stream);
     let (tun_reader, tun_writer) = split(tun_device);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
@@ -306,8 +309,9 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
     let tunnel_writer_task = {
         let shutdown = shutdown.clone();
         let alive = alive.clone();
+        let event_tx = event_tx.clone();
         tokio::spawn(async move {
-            tunnel_writer_loop(tls_writer, outbound_rx, shutdown, alive).await;
+            tunnel_writer_loop(tls_writer, outbound_rx, shutdown, alive, event_tx).await;
         })
     };
 
@@ -316,6 +320,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         let shutdown = shutdown.clone();
         let alive = alive.clone();
         let outbound_tx = outbound_tx.clone();
+        let event_tx = event_tx.clone();
         tokio::spawn(async move {
             tunnel_reader_loop(
                 tls_reader,
@@ -324,6 +329,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
                 shutdown,
                 alive,
                 magic_number,
+                event_tx,
             )
             .await;
         })
@@ -341,6 +347,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
     BridgeHandle {
         tasks: vec![tunnel_writer_task, tunnel_reader_task, tun_reader_task],
         alive,
+        event_rx,
     }
 }
 
@@ -349,6 +356,7 @@ async fn tunnel_writer_loop<W: AsyncWriteExt + Unpin>(
     mut rx: mpsc::Receiver<Vec<u8>>,
     shutdown: Arc<Notify>,
     alive: Arc<AtomicBool>,
+    event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
 ) {
     loop {
         tokio::select! {
@@ -358,6 +366,7 @@ async fn tunnel_writer_loop<W: AsyncWriteExt + Unpin>(
                     Some(payload) => {
                         if write_frame(&mut writer, &payload).await.is_err() {
                             alive.store(false, Ordering::Relaxed);
+                            let _ = event_tx.send(crate::VpnEvent::Died("TLS write error".to_string()));
                             break;
                         }
                     }
@@ -375,6 +384,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     shutdown: Arc<Notify>,
     alive: Arc<AtomicBool>,
     magic_number: u32,
+    event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
 ) {
     let mut echo_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     let mut echo_id: u8 = 0;
@@ -398,6 +408,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 missed_echoes = missed_echoes.saturating_add(1);
                 if missed_echoes > 3 {
                     alive.store(false, Ordering::Relaxed);
+                    let _ = event_tx.send(crate::VpnEvent::Died("LCP echo timeout — connection lost".to_string()));
                     break;
                 }
             }
@@ -406,6 +417,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     Ok(f) => f,
                     Err(_) => {
                         alive.store(false, Ordering::Relaxed);
+                        let _ = event_tx.send(crate::VpnEvent::Died("TLS tunnel read error".to_string()));
                         break;
                     }
                 };
@@ -458,6 +470,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                     };
                                     let _ = outbound_tx.send(ack.encode()).await;
                                     alive.store(false, Ordering::Relaxed);
+                                    let _ = event_tx.send(crate::VpnEvent::Died("Server terminated connection".to_string()));
                                     break;
                                 }
                                 _ => {}
@@ -526,11 +539,13 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone).await;
+            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
         });
 
         // Send some data through the channel
@@ -556,11 +571,13 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (_tx, rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone).await;
+            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
         });
 
         // Yield to let the spawned task reach the select! loop
@@ -581,11 +598,13 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone).await;
+            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
         });
 
         // Drop sender to close channel
@@ -607,6 +626,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, _outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -618,6 +639,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x12345678,
+                event_tx,
             )
             .await;
         });
@@ -665,6 +687,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let magic: u32 = 0xAABBCCDD;
         let shutdown_clone = shutdown.clone();
@@ -677,6 +701,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 magic,
+                event_tx,
             )
             .await;
         });
@@ -718,17 +743,20 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let alive_clone = alive.clone();
         let shutdown_clone = shutdown.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone).await;
+            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
         });
 
         // Send data - write should fail because server end is dropped
         let _ = tx.send(b"data".to_vec()).await;
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         assert!(!alive.load(Ordering::Relaxed));
+        assert!(matches!(*event_rx.borrow(), crate::VpnEvent::Died(_)));
     }
 
     #[tokio::test]
@@ -779,6 +807,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, _outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -790,6 +820,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x11111111,
+                event_tx,
             )
             .await;
         });
@@ -827,6 +858,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -838,6 +871,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x11111111,
+                event_tx,
             )
             .await;
         });
@@ -864,6 +898,7 @@ mod tests {
         // Should set alive to false
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
         assert!(!alive.load(Ordering::Relaxed));
+        assert!(matches!(*event_rx.borrow(), crate::VpnEvent::Died(_)));
     }
 
     #[tokio::test]
@@ -878,6 +913,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, _outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -889,6 +926,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x11111111,
+                event_tx,
             )
             .await;
         });
@@ -918,6 +956,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, _outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -929,6 +969,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x11111111,
+                event_tx,
             )
             .await;
         });
@@ -1029,6 +1070,8 @@ mod tests {
         let shutdown = Arc::new(Notify::new());
         let alive = Arc::new(AtomicBool::new(true));
         let (outbound_tx, _outbound_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
 
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
@@ -1040,6 +1083,7 @@ mod tests {
                 shutdown_clone,
                 alive_clone,
                 0x11111111,
+                event_tx,
             )
             .await;
         });
@@ -1049,5 +1093,6 @@ mod tests {
 
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         assert!(!alive.load(Ordering::Relaxed));
+        assert!(matches!(*event_rx.borrow(), crate::VpnEvent::Died(_)));
     }
 }

@@ -1,107 +1,49 @@
-//! Client for the privileged helper binary.
+//! Client for the privileged helper daemon.
 //!
-//! Launches `fortivpn-helper` via `osascript` (macOS admin prompt) and communicates
-//! over a Unix socket. The helper creates tun devices, manages routes, and configures DNS
+//! Connects to the launchd-managed helper daemon via a well-known Unix socket.
+//! The helper creates tun devices, manages routes, and configures DNS
 //! as root, while the main app remains unprivileged.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::io::{FromRawFd, RawFd};
-use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 
 use crate::{FortiError, VpnConfig};
 
-/// A connection to the privileged helper process.
+const HELPER_SOCKET_PATH: &str = "/var/run/fortivpn-helper.sock";
+
+/// A connection to the privileged helper daemon.
 pub struct HelperClient {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
-    socket_path: PathBuf,
 }
 
 impl HelperClient {
-    /// Launch the helper via osascript and establish a connection.
-    pub fn spawn() -> Result<Self, FortiError> {
-        let socket_path =
-            std::env::temp_dir().join(format!("fortivpn-helper-{}.sock", std::process::id()));
+    /// Connect to the launchd-managed helper daemon via well-known socket.
+    pub fn connect() -> Result<Self, FortiError> {
+        let stream = std::os::unix::net::UnixStream::connect(HELPER_SOCKET_PATH)
+            .map_err(|e| FortiError::TunDeviceError(format!(
+                "Connect to helper daemon: {e}. Is the helper installed? Run the app to trigger installation."
+            )))?;
 
-        // Clean up any stale socket
-        let _ = std::fs::remove_file(&socket_path);
-
-        // Create listener before launching helper
-        let listener = UnixListener::bind(&socket_path)
-            .map_err(|e| FortiError::TunDeviceError(format!("Create helper socket: {e}")))?;
-
-        // Find the helper binary next to our own executable
-        let helper_path = std::env::current_exe()
-            .map_err(|e| FortiError::TunDeviceError(format!("Find current exe: {e}")))?
-            .parent()
-            .ok_or_else(|| FortiError::TunDeviceError("No parent dir".into()))?
-            .join("fortivpn-helper");
-
-        if !helper_path.exists() {
-            return Err(FortiError::TunDeviceError(format!(
-                "Helper binary not found at {}",
-                helper_path.display()
-            )));
-        }
-
-        let helper_str = helper_path.to_string_lossy();
-        let socket_str = socket_path.to_string_lossy();
-
-        // Launch via osascript for admin privileges (shows native macOS password dialog)
-        let script = format!(
-            "do shell script \"'{}' '{}'\" with administrator privileges",
-            helper_str.replace('\'', "'\\''"),
-            socket_str.replace('\'', "'\\''"),
-        );
-
-        std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| FortiError::TunDeviceError(format!("Launch osascript: {e}")))?;
-
-        // Wait for helper to connect (with timeout)
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| FortiError::TunDeviceError(format!("Set blocking: {e}")))?;
-
-        // Set a timeout for accept
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(60); // user has 60s to enter password
-
-        let stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if start.elapsed() > timeout {
-                        let _ = std::fs::remove_file(&socket_path);
-                        return Err(FortiError::TunDeviceError(
-                            "Timed out waiting for helper (user cancelled?)".into(),
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&socket_path);
-                    return Err(FortiError::TunDeviceError(format!("Accept helper: {e}")));
-                }
-            }
-        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .map_err(|e| FortiError::TunDeviceError(format!("Set timeout: {e}")))?;
 
         let writer = stream
             .try_clone()
             .map_err(|e| FortiError::TunDeviceError(format!("Clone stream: {e}")))?;
         let reader = BufReader::new(stream);
 
-        Ok(Self {
-            reader,
-            writer,
-            socket_path,
-        })
+        Ok(Self { reader, writer })
+    }
+
+    /// Check the helper version.
+    pub fn version(&mut self) -> Result<String, FortiError> {
+        let cmd = serde_json::json!({"cmd": "version"});
+        self.send_cmd(&cmd)?;
+        let resp = self.read_response()?;
+        Ok(resp["version"].as_str().unwrap_or("unknown").to_string())
     }
 
     /// Ask the helper to create a tun device. Returns (raw_fd, tun_name).
@@ -215,12 +157,6 @@ impl HelperClient {
         }
 
         Ok(resp)
-    }
-}
-
-impl Drop for HelperClient {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 

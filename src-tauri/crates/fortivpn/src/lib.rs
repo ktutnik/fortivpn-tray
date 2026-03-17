@@ -66,12 +66,20 @@ impl From<std::io::Error> for FortiError {
 
 pub use auth::authenticate;
 
+/// Events emitted by the VPN session for status monitoring.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VpnEvent {
+    Alive,
+    Died(String),
+}
+
 /// An active VPN session. Holds the tunnel, tun device, and routing state.
 pub struct VpnSession {
     shutdown: Arc<Notify>,
     route_manager: Option<routing::RouteManager>,
     bridge_tasks: Vec<JoinHandle<()>>,
     alive: Arc<AtomicBool>,
+    event_rx: Option<tokio::sync::watch::Receiver<VpnEvent>>,
     host: String,
     port: u16,
     cookie: String,
@@ -146,11 +154,18 @@ impl VpnSession {
             route_manager: Some(route_manager),
             bridge_tasks: bridge_handle.tasks,
             alive: bridge_handle.alive,
+            event_rx: Some(bridge_handle.event_rx),
             host: host.to_string(),
             port,
             cookie,
             trusted_cert: trusted_cert.to_string(),
         })
+    }
+
+    /// Take the event receiver for external monitoring.
+    /// Returns `None` if already taken.
+    pub fn take_event_rx(&mut self) -> Option<tokio::sync::watch::Receiver<VpnEvent>> {
+        self.event_rx.take()
     }
 
     /// Check if the session is still alive (LCP echo health).
@@ -188,8 +203,12 @@ impl VpnSession {
 impl Drop for VpnSession {
     fn drop(&mut self) {
         self.shutdown.notify_waiters();
-        if let Some(ref mut rm) = self.route_manager {
-            rm.restore();
+        // Note: route cleanup requires the privileged helper, which Drop cannot access.
+        // The caller must call disconnect() before dropping to properly restore routes.
+        // Take the route_manager to prevent RouteManager::Drop from running
+        // unprivileged route commands (which would fail with "Permission denied").
+        if let Some(mut rm) = self.route_manager.take() {
+            rm.skip_drop_restore();
         }
     }
 }

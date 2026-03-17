@@ -5,13 +5,13 @@
 //! parent process via a Unix socket using SCM_RIGHTS, then executes route/DNS commands.
 //!
 //! Protocol (over Unix socket, newline-delimited JSON):
-//!   Parent → Helper: {"cmd":"create_tun","ip":"10.0.0.1","peer_ip":"10.0.0.2","mtu":1354}
-//!   Helper → Parent: {"ok":true,"tun_name":"utun5"}  (+ sends fd via SCM_RIGHTS)
-//!   Parent → Helper: {"cmd":"add_route","dest":"10.0.0.0/24","gateway":"10.0.0.1"}
-//!   Helper → Parent: {"ok":true}
-//!   Parent → Helper: {"cmd":"configure_dns","servers":["8.8.8.8"],"search_domain":"corp.com"}
-//!   Helper → Parent: {"ok":true}
-//!   Parent → Helper: {"cmd":"cleanup","routes":[...],"gateway_ip":"1.2.3.4","orig_gateway":"192.168.1.1"}
+//!   Parent -> Helper: {"cmd":"create_tun","ip":"10.0.0.1","peer_ip":"10.0.0.2","mtu":1354}
+//!   Helper -> Parent: {"ok":true,"tun_name":"utun5"}  (+ sends fd via SCM_RIGHTS)
+//!   Parent -> Helper: {"cmd":"add_route","dest":"10.0.0.0/24","gateway":"10.0.0.1"}
+//!   Helper -> Parent: {"ok":true}
+//!   Parent -> Helper: {"cmd":"configure_dns","servers":["8.8.8.8"],"search_domain":"corp.com"}
+//!   Helper -> Parent: {"ok":true}
+//!   Parent -> Helper: {"cmd":"cleanup","routes":[...],"gateway_ip":"1.2.3.4","orig_gateway":"192.168.1.1"}
 //!   (Helper cleans up routes/DNS and exits)
 
 use std::io::{BufRead, BufReader, Write};
@@ -20,22 +20,104 @@ use std::os::unix::net::UnixStream;
 use std::process::Command;
 use tun2::AbstractDevice;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: fortivpn-helper <socket-path>");
-        std::process::exit(1);
+mod launchd {
+    use std::os::unix::io::RawFd;
+
+    extern "C" {
+        fn launch_activate_socket(
+            name: *const libc::c_char,
+            fds: *mut *mut libc::c_int,
+            cnt: *mut libc::size_t,
+        ) -> libc::c_int;
     }
 
-    let socket_path = &args[1];
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to connect to {socket_path}: {e}");
-            std::process::exit(1);
+    pub fn activate_socket(name: &str) -> Result<Vec<RawFd>, String> {
+        use std::ffi::CString;
+        let c_name = CString::new(name).map_err(|e| format!("CString: {e}"))?;
+        let mut fds: *mut libc::c_int = std::ptr::null_mut();
+        let mut cnt: libc::size_t = 0;
+        let ret = unsafe { launch_activate_socket(c_name.as_ptr(), &mut fds, &mut cnt) };
+        if ret != 0 {
+            return Err(format!("launch_activate_socket failed: errno {ret}"));
         }
-    };
+        let fd_slice = unsafe { std::slice::from_raw_parts(fds, cnt) };
+        let result: Vec<RawFd> = fd_slice.to_vec();
+        unsafe { libc::free(fds as *mut libc::c_void) };
+        Ok(result)
+    }
+}
 
+const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const IDLE_TIMEOUT_SECS: u64 = 30;
+
+fn main() {
+    match launchd::activate_socket("Listeners") {
+        Ok(fds) if !fds.is_empty() => {
+            use std::os::unix::io::FromRawFd;
+            let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fds[0]) };
+            run_accept_loop(listener);
+        }
+        _ => {
+            let args: Vec<String> = std::env::args().collect();
+            if args.len() != 2 {
+                eprintln!("Usage: fortivpn-helper <socket-path>");
+                std::process::exit(1);
+            }
+            let stream = match UnixStream::connect(&args[1]) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to connect to {}: {e}", args[1]);
+                    std::process::exit(1);
+                }
+            };
+            handle_client(stream);
+        }
+    }
+}
+
+fn run_accept_loop(listener: std::os::unix::net::UnixListener) {
+    listener.set_nonblocking(true).expect("set nonblocking");
+    let mut last_activity = std::time::Instant::now();
+
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if !validate_peer(&stream) {
+                    eprintln!("Rejected connection from unauthorized peer");
+                    continue;
+                }
+                // Accepted stream inherits non-blocking from listener — set it back to blocking
+                stream.set_nonblocking(false).expect("set client blocking");
+                handle_client(stream);
+                last_activity = std::time::Instant::now();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_activity.elapsed() > std::time::Duration::from_secs(IDLE_TIMEOUT_SECS) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                eprintln!("Accept error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+fn validate_peer(stream: &std::os::unix::net::UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if ret != 0 {
+        return false;
+    }
+    gid == 20 || uid == 0
+}
+
+fn handle_client(stream: UnixStream) {
     let reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut writer = stream;
 
@@ -57,6 +139,12 @@ fn main() {
         match cmd {
             "ping" => {
                 let _ = send_ok(&mut writer, None);
+            }
+            "version" => {
+                let _ = send_ok(
+                    &mut writer,
+                    Some(serde_json::json!({"version": HELPER_VERSION})),
+                );
             }
             "create_tun" => handle_create_tun(&msg, &mut writer),
             "add_route" => handle_add_route(&msg, &mut writer),

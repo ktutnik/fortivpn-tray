@@ -1,4 +1,5 @@
-use crate::keychain;
+use std::collections::HashMap;
+
 use crate::profile::VpnProfile;
 use fortivpn::helper::HelperClient;
 use fortivpn::VpnSession;
@@ -14,9 +15,11 @@ pub enum VpnStatus {
 
 pub struct VpnManager {
     pub status: VpnStatus,
-    session: Option<VpnSession>,
+    pub(crate) session: Option<VpnSession>,
     helper: Option<HelperClient>,
-    connected_profile_id: Option<String>,
+    pub(crate) connected_profile_id: Option<String>,
+    pub(crate) monitor_handle: Option<tauri::async_runtime::JoinHandle<()>>,
+    pub(crate) session_passwords: HashMap<String, String>,
 }
 
 impl VpnManager {
@@ -26,6 +29,8 @@ impl VpnManager {
             session: None,
             helper: None,
             connected_profile_id: None,
+            monitor_handle: None,
+            session_passwords: HashMap::new(),
         }
     }
 
@@ -33,19 +38,26 @@ impl VpnManager {
         self.connected_profile_id.as_deref()
     }
 
-    /// Ensure the privileged helper is running, spawning it if needed.
+    pub fn get_password(&self, profile_id: &str) -> Result<String, String> {
+        if let Some(pw) = self.session_passwords.get(profile_id) {
+            return Ok(pw.clone());
+        }
+        crate::keychain::get_password(profile_id)
+    }
+
+    /// Ensure we have a connection to the privileged helper daemon.
     fn ensure_helper(&mut self) -> Result<&mut HelperClient, String> {
-        // Check if existing helper is still alive by sending a ping
+        // Check if existing connection is still alive by sending a ping
         if let Some(ref mut h) = self.helper {
             if h.ping().is_ok() {
                 return Ok(self.helper.as_mut().unwrap());
             }
-            // Helper died, drop it
+            // Connection lost, drop it
             self.helper = None;
         }
 
-        // Spawn a new helper
-        let helper = HelperClient::spawn().map_err(|e| e.to_string())?;
+        // Connect to the launchd-managed helper daemon
+        let helper = HelperClient::connect().map_err(|e| e.to_string())?;
         self.helper = Some(helper);
         Ok(self.helper.as_mut().unwrap())
     }
@@ -57,7 +69,7 @@ impl VpnManager {
 
         self.status = VpnStatus::Connecting;
 
-        let password = keychain::get_password(&profile.id)?;
+        let password = self.get_password(&profile.id)?;
 
         // Ensure helper is running (spawns on first connect, reuses after)
         self.ensure_helper()?;
@@ -86,6 +98,7 @@ impl VpnManager {
 
     /// Check if the VPN session is still alive.
     /// Returns true if it was connected but the session has died.
+    #[allow(dead_code)]
     pub async fn check_alive(&mut self) -> bool {
         if self.status != VpnStatus::Connected {
             return false;
@@ -101,11 +114,34 @@ impl VpnManager {
         false
     }
 
+    /// Handle session death detected by the event monitor.
+    /// Unlike disconnect(), this does NOT abort the monitor (caller IS the monitor).
+    pub async fn handle_session_death(&mut self, reason: String) {
+        if let Some(ref mut session) = self.session {
+            session.disconnect(self.helper.as_mut()).await;
+        }
+        self.session = None;
+        if let Some(ref id) = self.connected_profile_id {
+            self.session_passwords.remove(id);
+        }
+        self.connected_profile_id = None;
+        self.status = VpnStatus::Error(reason);
+        self.monitor_handle = None;
+    }
+
     pub async fn disconnect(&mut self) -> Result<(), String> {
         self.status = VpnStatus::Disconnecting;
 
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+
         if let Some(ref mut session) = self.session {
             session.disconnect(self.helper.as_mut()).await;
+        }
+
+        if let Some(ref id) = self.connected_profile_id {
+            self.session_passwords.remove(id);
         }
 
         self.session = None;

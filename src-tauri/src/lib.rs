@@ -1,3 +1,4 @@
+mod installer;
 mod ipc;
 mod keychain;
 mod profile;
@@ -8,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 use profile::{ProfileStore, VpnProfile};
 use vpn::{VpnManager, VpnStatus};
@@ -42,21 +43,15 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
-/// Build an AppleScript notification command string, escaping special characters.
-fn build_notification_script(title: &str, message: &str) -> String {
-    format!(
-        "display notification \"{}\" with title \"{}\"",
-        message.replace('\\', "\\\\").replace('"', "\\\""),
-        title.replace('\\', "\\\\").replace('"', "\\\""),
-    )
-}
-
 /// Send a macOS notification with the error details.
-fn send_error_notification(title: &str, message: &str) {
-    let script = build_notification_script(title, message);
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+fn send_error_notification(app: &tauri::AppHandle, title: &str, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(message)
+        .show();
 }
 
 fn build_tray_menu(
@@ -267,6 +262,22 @@ fn cmd_set_password(id: String, password: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn cmd_submit_password(
+    vpn: tauri::State<'_, VpnState>,
+    profile_id: String,
+    password: String,
+    remember: bool,
+) -> Result<(), String> {
+    if remember {
+        keychain::store_password(&profile_id, &password)?;
+    } else {
+        let mut vpn_lock = vpn.lock().await;
+        vpn_lock.session_passwords.insert(profile_id, password);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn has_password(id: String) -> bool {
     keychain::get_password(&id).is_ok()
 }
@@ -291,15 +302,36 @@ fn open_settings_window(app: &tauri::AppHandle) {
     .build();
 }
 
+fn open_password_prompt(app: &tauri::AppHandle, profile_id: &str, profile_name: &str) {
+    let encoded_id = urlencoding::encode(profile_id);
+    let encoded_name = urlencoding::encode(profile_name);
+    let url = format!(
+        "/password-prompt.html?profileId={}&profileName={}",
+        encoded_id, encoded_name
+    );
+    let _ = tauri::WebviewWindowBuilder::new(
+        app,
+        "password-prompt",
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("Enter VPN Password")
+    .inner_size(320.0, 180.0)
+    .resizable(false)
+    .center()
+    .build();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_profiles,
             save_profile,
             delete_profile,
             cmd_set_password,
+            cmd_submit_password,
             has_password,
         ])
         .setup(|app| {
@@ -316,6 +348,13 @@ pub fn run() {
             let store_state: StoreState = Arc::new(Mutex::new(store));
             app.manage(vpn_state);
             app.manage(store_state);
+
+            // Check if helper needs installation or upgrade
+            if !installer::is_helper_installed() {
+                if let Err(e) = installer::install_helper(app.handle()) {
+                    eprintln!("Helper installation failed: {e}");
+                }
+            }
 
             // Start IPC server for CLI companion
             ipc::start_ipc_server(app.handle().clone());
@@ -355,29 +394,22 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Background monitor: check if VPN process died every 5 seconds
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    let died = {
-                        let vpn = app_handle.state::<VpnState>();
-                        let mut vpn_lock = vpn.lock().await;
-                        vpn_lock.check_alive().await
-                    };
-                    if died {
-                        let vpn = app_handle.state::<VpnState>();
-                        let vpn_lock = vpn.lock().await;
-                        // Send notification if process died with an error
-                        if let VpnStatus::Error(ref e) = vpn_lock.status {
-                            send_error_notification("FortiVPN Disconnected", e);
+            // Listen for password-submitted events to retrigger connect
+            {
+                let app_handle = app.handle().clone();
+                app.listen("password-submitted", move |event| {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload())
+                    {
+                        if let Some(profile_id) = payload["profileId"].as_str() {
+                            let app = app_handle.clone();
+                            let pid = profile_id.to_string();
+                            tauri::async_runtime::spawn(async move {
+                                handle_connect(&app, &pid).await;
+                            });
                         }
-                        let store = app_handle.state::<StoreState>();
-                        let store_lock = store.lock().unwrap();
-                        rebuild_tray(&app_handle, &vpn_lock, &store_lock);
                     }
-                }
-            });
+                });
+            }
 
             // Hide from dock — must be done AFTER Tauri init (it overrides activation policy)
             #[cfg(target_os = "macos")]
@@ -416,6 +448,18 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
         return;
     };
 
+    // Check for password (session map first, then keychain)
+    let has_pw = {
+        let vpn = app.state::<VpnState>();
+        let vpn_lock = vpn.lock().await;
+        vpn_lock.get_password(&profile.id).is_ok()
+    };
+
+    if !has_pw {
+        open_password_prompt(app, &profile.id, &profile.name);
+        return;
+    }
+
     // Connect (holds async lock across await — that's fine with tokio::sync::Mutex)
     let result = {
         let vpn = app.state::<VpnState>();
@@ -425,7 +469,7 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
 
     if let Err(e) = &result {
         eprintln!("VPN connect error: {e}");
-        send_error_notification("FortiVPN Connection Failed", e);
+        send_error_notification(app, "FortiVPN Connection Failed", e);
     }
 
     // Rebuild menu with updated state
@@ -435,6 +479,46 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
         let store = app.state::<StoreState>();
         let store_lock = store.lock().unwrap();
         rebuild_tray(app, &vpn_lock, &store_lock);
+    }
+
+    // Spawn event-driven monitor for this connection
+    {
+        let vpn = app.state::<VpnState>();
+        let mut vpn_lock = vpn.lock().await;
+        if let Some(ref mut session) = vpn_lock.session {
+            if let Some(event_rx) = session.take_event_rx() {
+                let app_handle = app.clone();
+                let handle = tauri::async_runtime::spawn(async move {
+                    let mut rx = event_rx;
+                    loop {
+                        if rx.changed().await.is_err() {
+                            break; // sender dropped
+                        }
+                        let event = rx.borrow().clone();
+                        if let fortivpn::VpnEvent::Died(ref reason) = event {
+                            let reason = reason.clone();
+                            // Clean up session via helper (restores routes/DNS with root privileges)
+                            {
+                                let vpn = app_handle.state::<VpnState>();
+                                let mut vpn_lock = vpn.lock().await;
+                                vpn_lock.handle_session_death(reason.clone()).await;
+                            }
+                            // Send notification and rebuild tray (outside VPN lock)
+                            send_error_notification(&app_handle, "FortiVPN Disconnected", &reason);
+                            {
+                                let vpn = app_handle.state::<VpnState>();
+                                let vpn_lock = vpn.lock().await;
+                                let store = app_handle.state::<StoreState>();
+                                let store_lock = store.lock().unwrap();
+                                rebuild_tray(&app_handle, &vpn_lock, &store_lock);
+                            }
+                            break;
+                        }
+                    }
+                });
+                vpn_lock.monitor_handle = Some(handle);
+            }
+        }
     }
 }
 
@@ -525,41 +609,6 @@ mod tests {
         }
         let joined = lines.join(" ");
         assert_eq!(joined, text);
-    }
-
-    // build_notification_script tests
-    #[test]
-    fn test_notification_script_basic() {
-        let script = build_notification_script("Title", "Message");
-        assert_eq!(
-            script,
-            "display notification \"Message\" with title \"Title\""
-        );
-    }
-
-    #[test]
-    fn test_notification_script_escapes_quotes() {
-        let script = build_notification_script("My \"App\"", "He said \"hello\"");
-        assert!(script.contains(r#"He said \"hello\""#));
-        assert!(script.contains(r#"My \"App\""#));
-    }
-
-    #[test]
-    fn test_notification_script_escapes_backslash() {
-        let script = build_notification_script("Title", "path\\to\\file");
-        assert!(script.contains(r"path\\to\\file"));
-    }
-
-    #[test]
-    fn test_notification_script_empty_strings() {
-        let script = build_notification_script("", "");
-        assert_eq!(script, "display notification \"\" with title \"\"");
-    }
-
-    #[test]
-    fn test_notification_script_special_chars() {
-        let script = build_notification_script("VPN Error", "Connection failed: timeout (10s)");
-        assert!(script.contains("Connection failed: timeout (10s)"));
     }
 
     // ProfileView serialization tests
