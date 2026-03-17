@@ -15,6 +15,9 @@ dist-ssr
 # Claude Code
 .claude/
 
+# Git worktrees
+.worktrees/
+
 # Superpowers plans/specs (internal)
 docs/superpowers/
 docs/plans/
