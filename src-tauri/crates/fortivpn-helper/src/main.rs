@@ -86,6 +86,8 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener) {
                     eprintln!("Rejected connection from unauthorized peer");
                     continue;
                 }
+                // Accepted stream inherits non-blocking from listener — set it back to blocking
+                stream.set_nonblocking(false).expect("set client blocking");
                 handle_client(stream);
                 last_activity = std::time::Instant::now();
             }
