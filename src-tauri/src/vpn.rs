@@ -14,9 +14,10 @@ pub enum VpnStatus {
 
 pub struct VpnManager {
     pub status: VpnStatus,
-    session: Option<VpnSession>,
+    pub(crate) session: Option<VpnSession>,
     helper: Option<HelperClient>,
-    connected_profile_id: Option<String>,
+    pub(crate) connected_profile_id: Option<String>,
+    pub(crate) monitor_handle: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl VpnManager {
@@ -26,6 +27,7 @@ impl VpnManager {
             session: None,
             helper: None,
             connected_profile_id: None,
+            monitor_handle: None,
         }
     }
 
@@ -103,6 +105,10 @@ impl VpnManager {
 
     pub async fn disconnect(&mut self) -> Result<(), String> {
         self.status = VpnStatus::Disconnecting;
+
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
 
         if let Some(ref mut session) = self.session {
             session.disconnect(self.helper.as_mut()).await;

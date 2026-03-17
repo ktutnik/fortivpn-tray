@@ -355,30 +355,6 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Background monitor: check if VPN process died every 5 seconds
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    let died = {
-                        let vpn = app_handle.state::<VpnState>();
-                        let mut vpn_lock = vpn.lock().await;
-                        vpn_lock.check_alive().await
-                    };
-                    if died {
-                        let vpn = app_handle.state::<VpnState>();
-                        let vpn_lock = vpn.lock().await;
-                        // Send notification if process died with an error
-                        if let VpnStatus::Error(ref e) = vpn_lock.status {
-                            send_error_notification("FortiVPN Disconnected", e);
-                        }
-                        let store = app_handle.state::<StoreState>();
-                        let store_lock = store.lock().unwrap();
-                        rebuild_tray(&app_handle, &vpn_lock, &store_lock);
-                    }
-                }
-            });
-
             // Hide from dock — must be done AFTER Tauri init (it overrides activation policy)
             #[cfg(target_os = "macos")]
             {
@@ -435,6 +411,49 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
         let store = app.state::<StoreState>();
         let store_lock = store.lock().unwrap();
         rebuild_tray(app, &vpn_lock, &store_lock);
+    }
+
+    // Spawn event-driven monitor for this connection
+    {
+        let vpn = app.state::<VpnState>();
+        let mut vpn_lock = vpn.lock().await;
+        if let Some(ref mut session) = vpn_lock.session {
+            if let Some(event_rx) = session.take_event_rx() {
+                let app_handle = app.clone();
+                let handle = tauri::async_runtime::spawn(async move {
+                    let mut rx = event_rx;
+                    loop {
+                        if rx.changed().await.is_err() {
+                            break; // sender dropped
+                        }
+                        let event = rx.borrow().clone();
+                        if let fortivpn::VpnEvent::Died(ref reason) = event {
+                            let reason = reason.clone();
+                            // Update VPN state (short lock scope)
+                            {
+                                let vpn = app_handle.state::<VpnState>();
+                                let mut vpn_lock = vpn.lock().await;
+                                vpn_lock.session = None;
+                                vpn_lock.connected_profile_id = None;
+                                vpn_lock.status = VpnStatus::Error(reason.clone());
+                                vpn_lock.monitor_handle = None;
+                            }
+                            // Send notification and rebuild tray (outside VPN lock)
+                            send_error_notification("FortiVPN Disconnected", &reason);
+                            {
+                                let vpn = app_handle.state::<VpnState>();
+                                let vpn_lock = vpn.lock().await;
+                                let store = app_handle.state::<StoreState>();
+                                let store_lock = store.lock().unwrap();
+                                rebuild_tray(&app_handle, &vpn_lock, &store_lock);
+                            }
+                            break;
+                        }
+                    }
+                });
+                vpn_lock.monitor_handle = Some(handle);
+            }
+        }
     }
 }
 
