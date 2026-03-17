@@ -35,19 +35,19 @@ impl VpnManager {
         self.connected_profile_id.as_deref()
     }
 
-    /// Ensure the privileged helper is running, spawning it if needed.
+    /// Ensure we have a connection to the privileged helper daemon.
     fn ensure_helper(&mut self) -> Result<&mut HelperClient, String> {
-        // Check if existing helper is still alive by sending a ping
+        // Check if existing connection is still alive by sending a ping
         if let Some(ref mut h) = self.helper {
             if h.ping().is_ok() {
                 return Ok(self.helper.as_mut().unwrap());
             }
-            // Helper died, drop it
+            // Connection lost, drop it
             self.helper = None;
         }
 
-        // Spawn a new helper
-        let helper = HelperClient::spawn().map_err(|e| e.to_string())?;
+        // Connect to the launchd-managed helper daemon
+        let helper = HelperClient::connect().map_err(|e| e.to_string())?;
         self.helper = Some(helper);
         Ok(self.helper.as_mut().unwrap())
     }
