@@ -203,8 +203,12 @@ impl VpnSession {
 impl Drop for VpnSession {
     fn drop(&mut self) {
         self.shutdown.notify_waiters();
-        if let Some(ref mut rm) = self.route_manager {
-            rm.restore();
+        // Note: route cleanup requires the privileged helper, which Drop cannot access.
+        // The caller must call disconnect() before dropping to properly restore routes.
+        // Take the route_manager to prevent RouteManager::Drop from running
+        // unprivileged route commands (which would fail with "Permission denied").
+        if let Some(mut rm) = self.route_manager.take() {
+            rm.skip_drop_restore();
         }
     }
 }

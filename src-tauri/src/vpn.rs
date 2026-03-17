@@ -114,6 +114,21 @@ impl VpnManager {
         false
     }
 
+    /// Handle session death detected by the event monitor.
+    /// Unlike disconnect(), this does NOT abort the monitor (caller IS the monitor).
+    pub async fn handle_session_death(&mut self, reason: String) {
+        if let Some(ref mut session) = self.session {
+            session.disconnect(self.helper.as_mut()).await;
+        }
+        self.session = None;
+        if let Some(ref id) = self.connected_profile_id {
+            self.session_passwords.remove(id);
+        }
+        self.connected_profile_id = None;
+        self.status = VpnStatus::Error(reason);
+        self.monitor_handle = None;
+    }
+
     pub async fn disconnect(&mut self) -> Result<(), String> {
         self.status = VpnStatus::Disconnecting;
 

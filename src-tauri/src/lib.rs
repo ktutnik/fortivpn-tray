@@ -497,14 +497,11 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
                         let event = rx.borrow().clone();
                         if let fortivpn::VpnEvent::Died(ref reason) = event {
                             let reason = reason.clone();
-                            // Update VPN state (short lock scope)
+                            // Clean up session via helper (restores routes/DNS with root privileges)
                             {
                                 let vpn = app_handle.state::<VpnState>();
                                 let mut vpn_lock = vpn.lock().await;
-                                vpn_lock.session = None;
-                                vpn_lock.connected_profile_id = None;
-                                vpn_lock.status = VpnStatus::Error(reason.clone());
-                                vpn_lock.monitor_handle = None;
+                                vpn_lock.handle_session_death(reason.clone()).await;
                             }
                             // Send notification and rebuild tray (outside VPN lock)
                             send_error_notification(&app_handle, "FortiVPN Disconnected", &reason);

@@ -12,6 +12,7 @@ pub struct RouteManager {
     full_tunnel: bool,
     tun_name: String,
     ipv6_disabled_interfaces: Vec<String>,
+    skip_restore_on_drop: bool,
 }
 
 impl RouteManager {
@@ -23,6 +24,7 @@ impl RouteManager {
             full_tunnel: false,
             tun_name: tun_name.to_string(),
             ipv6_disabled_interfaces: Vec::new(),
+            skip_restore_on_drop: false,
         }
     }
 
@@ -111,6 +113,12 @@ impl RouteManager {
         Ok(())
     }
 
+    /// Mark this route manager to skip restore on drop.
+    /// Used when the session is dropped without helper access (e.g., panic, event monitor).
+    pub fn skip_drop_restore(&mut self) {
+        self.skip_restore_on_drop = true;
+    }
+
     /// Restore routes via the privileged helper.
     pub fn restore_via_helper(&mut self, helper: Option<&mut HelperClient>) {
         // Restore IPv6 first (no root needed)
@@ -146,7 +154,9 @@ impl RouteManager {
 
 impl Drop for RouteManager {
     fn drop(&mut self) {
-        self.restore();
+        if !self.skip_restore_on_drop {
+            self.restore();
+        }
     }
 }
 
