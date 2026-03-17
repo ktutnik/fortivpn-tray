@@ -14,6 +14,7 @@ pub fn is_helper_installed() -> bool {
 }
 
 /// Check if the installed helper needs upgrading.
+#[allow(dead_code)]
 pub fn needs_upgrade(bundled_version: &str) -> bool {
     match fortivpn::helper::HelperClient::connect() {
         Ok(mut client) => match client.version() {

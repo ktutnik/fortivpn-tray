@@ -46,7 +46,12 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 /// Send a macOS notification with the error details.
 fn send_error_notification(app: &tauri::AppHandle, title: &str, message: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title(title).body(message).show();
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(message)
+        .show();
 }
 
 fn build_tray_menu(
@@ -393,8 +398,7 @@ pub fn run() {
             {
                 let app_handle = app.handle().clone();
                 app.listen("password-submitted", move |event| {
-                    if let Ok(payload) =
-                        serde_json::from_str::<serde_json::Value>(event.payload())
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload())
                     {
                         if let Some(profile_id) = payload["profileId"].as_str() {
                             let app = app_handle.clone();

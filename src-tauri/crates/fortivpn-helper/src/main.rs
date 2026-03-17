@@ -54,8 +54,7 @@ fn main() {
     match launchd::activate_socket("Listeners") {
         Ok(fds) if !fds.is_empty() => {
             use std::os::unix::io::FromRawFd;
-            let listener =
-                unsafe { std::os::unix::net::UnixListener::from_raw_fd(fds[0]) };
+            let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fds[0]) };
             run_accept_loop(listener);
         }
         _ => {
@@ -87,14 +86,11 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener) {
                     eprintln!("Rejected connection from unauthorized peer");
                     continue;
                 }
-                last_activity = std::time::Instant::now();
                 handle_client(stream);
                 last_activity = std::time::Instant::now();
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if last_activity.elapsed()
-                    > std::time::Duration::from_secs(IDLE_TIMEOUT_SECS)
-                {
+                if last_activity.elapsed() > std::time::Duration::from_secs(IDLE_TIMEOUT_SECS) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));

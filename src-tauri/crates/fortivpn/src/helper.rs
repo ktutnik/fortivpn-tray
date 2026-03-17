@@ -26,10 +26,12 @@ impl HelperClient {
                 "Connect to helper daemon: {e}. Is the helper installed? Run the app to trigger installation."
             )))?;
 
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .map_err(|e| FortiError::TunDeviceError(format!("Set timeout: {e}")))?;
 
-        let writer = stream.try_clone()
+        let writer = stream
+            .try_clone()
             .map_err(|e| FortiError::TunDeviceError(format!("Clone stream: {e}")))?;
         let reader = BufReader::new(stream);
 

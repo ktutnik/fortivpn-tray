@@ -98,6 +98,7 @@ impl VpnManager {
 
     /// Check if the VPN session is still alive.
     /// Returns true if it was connected but the session has died.
+    #[allow(dead_code)]
     pub async fn check_alive(&mut self) -> bool {
         if self.status != VpnStatus::Connected {
             return false;
