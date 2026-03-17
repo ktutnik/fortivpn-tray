@@ -23,6 +23,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "resources/com.fortivpn-tray.helper.plist"
+    ],
     "macOS": {
       "frameworks": [],
       "infoPlist": "Info.plist"

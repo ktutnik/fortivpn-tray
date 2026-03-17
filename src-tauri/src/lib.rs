@@ -1,3 +1,4 @@
+mod installer;
 mod ipc;
 mod keychain;
 mod profile;
@@ -306,6 +307,13 @@ pub fn run() {
             let store_state: StoreState = Arc::new(Mutex::new(store));
             app.manage(vpn_state);
             app.manage(store_state);
+
+            // Check if helper needs installation or upgrade
+            if !installer::is_helper_installed() {
+                if let Err(e) = installer::install_helper(app.handle()) {
+                    eprintln!("Helper installation failed: {e}");
+                }
+            }
 
             // Start IPC server for CLI companion
             ipc::start_ipc_server(app.handle().clone());
