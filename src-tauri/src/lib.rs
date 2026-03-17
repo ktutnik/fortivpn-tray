@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 
 use profile::{ProfileStore, VpnProfile};
 use vpn::{VpnManager, VpnStatus};
@@ -257,6 +257,22 @@ fn cmd_set_password(id: String, password: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn cmd_submit_password(
+    vpn: tauri::State<'_, VpnState>,
+    profile_id: String,
+    password: String,
+    remember: bool,
+) -> Result<(), String> {
+    if remember {
+        keychain::store_password(&profile_id, &password)?;
+    } else {
+        let mut vpn_lock = vpn.lock().await;
+        vpn_lock.session_passwords.insert(profile_id, password);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn has_password(id: String) -> bool {
     keychain::get_password(&id).is_ok()
 }
@@ -281,6 +297,25 @@ fn open_settings_window(app: &tauri::AppHandle) {
     .build();
 }
 
+fn open_password_prompt(app: &tauri::AppHandle, profile_id: &str, profile_name: &str) {
+    let encoded_id = urlencoding::encode(profile_id);
+    let encoded_name = urlencoding::encode(profile_name);
+    let url = format!(
+        "/password-prompt.html?profileId={}&profileName={}",
+        encoded_id, encoded_name
+    );
+    let _ = tauri::WebviewWindowBuilder::new(
+        app,
+        "password-prompt",
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("Enter VPN Password")
+    .inner_size(320.0, 180.0)
+    .resizable(false)
+    .center()
+    .build();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -291,6 +326,7 @@ pub fn run() {
             save_profile,
             delete_profile,
             cmd_set_password,
+            cmd_submit_password,
             has_password,
         ])
         .setup(|app| {
@@ -353,6 +389,24 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Listen for password-submitted events to retrigger connect
+            {
+                let app_handle = app.handle().clone();
+                app.listen("password-submitted", move |event| {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(event.payload())
+                    {
+                        if let Some(profile_id) = payload["profileId"].as_str() {
+                            let app = app_handle.clone();
+                            let pid = profile_id.to_string();
+                            tauri::async_runtime::spawn(async move {
+                                handle_connect(&app, &pid).await;
+                            });
+                        }
+                    }
+                });
+            }
+
             // Hide from dock — must be done AFTER Tauri init (it overrides activation policy)
             #[cfg(target_os = "macos")]
             {
@@ -389,6 +443,18 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
         eprintln!("Profile not found: {profile_id}");
         return;
     };
+
+    // Check for password (session map first, then keychain)
+    let has_pw = {
+        let vpn = app.state::<VpnState>();
+        let vpn_lock = vpn.lock().await;
+        vpn_lock.get_password(&profile.id).is_ok()
+    };
+
+    if !has_pw {
+        open_password_prompt(app, &profile.id, &profile.name);
+        return;
+    }
 
     // Connect (holds async lock across await — that's fine with tokio::sync::Mutex)
     let result = {

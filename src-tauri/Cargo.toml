@@ -32,3 +32,4 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 objc2 = "0.6"
+urlencoding = "2"

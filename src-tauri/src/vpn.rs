@@ -1,4 +1,5 @@
-use crate::keychain;
+use std::collections::HashMap;
+
 use crate::profile::VpnProfile;
 use fortivpn::helper::HelperClient;
 use fortivpn::VpnSession;
@@ -18,6 +19,7 @@ pub struct VpnManager {
     helper: Option<HelperClient>,
     pub(crate) connected_profile_id: Option<String>,
     pub(crate) monitor_handle: Option<tauri::async_runtime::JoinHandle<()>>,
+    pub(crate) session_passwords: HashMap<String, String>,
 }
 
 impl VpnManager {
@@ -28,11 +30,19 @@ impl VpnManager {
             helper: None,
             connected_profile_id: None,
             monitor_handle: None,
+            session_passwords: HashMap::new(),
         }
     }
 
     pub fn connected_profile_id(&self) -> Option<&str> {
         self.connected_profile_id.as_deref()
+    }
+
+    pub fn get_password(&self, profile_id: &str) -> Result<String, String> {
+        if let Some(pw) = self.session_passwords.get(profile_id) {
+            return Ok(pw.clone());
+        }
+        crate::keychain::get_password(profile_id)
     }
 
     /// Ensure we have a connection to the privileged helper daemon.
@@ -59,7 +69,7 @@ impl VpnManager {
 
         self.status = VpnStatus::Connecting;
 
-        let password = keychain::get_password(&profile.id)?;
+        let password = self.get_password(&profile.id)?;
 
         // Ensure helper is running (spawns on first connect, reuses after)
         self.ensure_helper()?;
@@ -112,6 +122,10 @@ impl VpnManager {
 
         if let Some(ref mut session) = self.session {
             session.disconnect(self.helper.as_mut()).await;
+        }
+
+        if let Some(ref id) = self.connected_profile_id {
+            self.session_passwords.remove(id);
         }
 
         self.session = None;
