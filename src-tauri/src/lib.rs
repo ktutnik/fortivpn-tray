@@ -42,21 +42,10 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
-/// Build an AppleScript notification command string, escaping special characters.
-fn build_notification_script(title: &str, message: &str) -> String {
-    format!(
-        "display notification \"{}\" with title \"{}\"",
-        message.replace('\\', "\\\\").replace('"', "\\\""),
-        title.replace('\\', "\\\\").replace('"', "\\\""),
-    )
-}
-
 /// Send a macOS notification with the error details.
-fn send_error_notification(title: &str, message: &str) {
-    let script = build_notification_script(title, message);
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+fn send_error_notification(app: &tauri::AppHandle, title: &str, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(message).show();
 }
 
 fn build_tray_menu(
@@ -295,6 +284,7 @@ fn open_settings_window(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_profiles,
             save_profile,
@@ -401,7 +391,7 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
 
     if let Err(e) = &result {
         eprintln!("VPN connect error: {e}");
-        send_error_notification("FortiVPN Connection Failed", e);
+        send_error_notification(app, "FortiVPN Connection Failed", e);
     }
 
     // Rebuild menu with updated state
@@ -439,7 +429,7 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
                                 vpn_lock.monitor_handle = None;
                             }
                             // Send notification and rebuild tray (outside VPN lock)
-                            send_error_notification("FortiVPN Disconnected", &reason);
+                            send_error_notification(&app_handle, "FortiVPN Disconnected", &reason);
                             {
                                 let vpn = app_handle.state::<VpnState>();
                                 let vpn_lock = vpn.lock().await;
@@ -544,41 +534,6 @@ mod tests {
         }
         let joined = lines.join(" ");
         assert_eq!(joined, text);
-    }
-
-    // build_notification_script tests
-    #[test]
-    fn test_notification_script_basic() {
-        let script = build_notification_script("Title", "Message");
-        assert_eq!(
-            script,
-            "display notification \"Message\" with title \"Title\""
-        );
-    }
-
-    #[test]
-    fn test_notification_script_escapes_quotes() {
-        let script = build_notification_script("My \"App\"", "He said \"hello\"");
-        assert!(script.contains(r#"He said \"hello\""#));
-        assert!(script.contains(r#"My \"App\""#));
-    }
-
-    #[test]
-    fn test_notification_script_escapes_backslash() {
-        let script = build_notification_script("Title", "path\\to\\file");
-        assert!(script.contains(r"path\\to\\file"));
-    }
-
-    #[test]
-    fn test_notification_script_empty_strings() {
-        let script = build_notification_script("", "");
-        assert_eq!(script, "display notification \"\" with title \"\"");
-    }
-
-    #[test]
-    fn test_notification_script_special_chars() {
-        let script = build_notification_script("VPN Error", "Connection failed: timeout (10s)");
-        assert!(script.contains("Connection failed: timeout (10s)"));
     }
 
     // ProfileView serialization tests
