@@ -42,6 +42,8 @@ Replace osascript-based helper spawning with a launchd-managed daemon using sock
         <dict>
             <key>SockPathName</key>
             <string>/var/run/fortivpn-helper.sock</string>
+            <key>SockMode</key>
+            <integer>438</integer>  <!-- 0o666: any local user can connect; auth via getpeereid -->
         </dict>
     </dict>
     <key>KeepAlive</key>
@@ -50,23 +52,39 @@ Replace osascript-based helper spawning with a launchd-managed daemon using sock
 </plist>
 ```
 
+**Socket authentication:**
+The daemon validates every connecting client using `getpeereid()` to obtain the peer's UID/GID. Only connections from the same UID that installed the app (stored during installation) or from the `staff` group are accepted. All other connections are rejected immediately. This prevents arbitrary local users from sending root commands to the daemon.
+
+**Daemon idle strategy:**
+After the last client disconnects, the daemon stays alive for 30 seconds (idle timeout). If no new connection arrives within that window, it exits cleanly. This prevents race conditions during disconnect/reconnect cycles while avoiding persistent idle processes.
+
 **Behavior:**
 - `KeepAlive: false` with socket activation — daemon sleeps until tray app connects to socket, zero energy when idle
 - launchd creates the socket at boot; daemon process only starts when data arrives
 - Daemon handles TUN creation, route/DNS commands, fd passing (same as today)
-- Daemon exits when socket closes (or stays alive briefly for reconnect scenarios)
+- Single well-known socket replaces the per-process temp socket (`/tmp/fortivpn-helper-{pid}.sock`)
 
 **First-launch installation flow:**
-1. App detects helper not installed (check for plist or try connecting to socket)
+1. App detects helper not installed (try connecting to `/var/run/fortivpn-helper.sock` — if connection refused or socket missing, helper needs install)
 2. Shows explanation dialog: "FortiVPN needs to install a helper for VPN connections"
-3. One-time `osascript` admin prompt to copy binary + plist and run `launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist`
+3. One-time `osascript` admin prompt to run an install script that:
+   - Copies helper binary to `/Library/PrivilegedHelperTools/fortivpn-helper`
+   - Copies plist to `/Library/LaunchDaemons/com.fortivpn-tray.helper.plist`
+   - Runs `launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist`
 4. Never asks for admin password again
+
+**Note on SMJobBless/SMAppService:** These are Apple's recommended mechanisms but require Xcode-specific code signing entitlements and embedded `Info.plist` configurations that are difficult to set up with a Rust/Tauri build pipeline. The `osascript` + `launchctl bootstrap` approach works for non-App-Store distribution (which this app uses — distributed via GitHub Releases as `.dmg`). If macOS hardened runtime blocks the install script, we fall back to prompting the user to run the install command manually in Terminal.
+
+**Helper versioning and upgrades:**
+On app launch, if the daemon socket is reachable, the tray app sends a `version` command. If the installed helper version is older than the bundled version, the app triggers the install flow again (one admin prompt to replace the binary and restart the daemon via `launchctl bootout` + `launchctl bootstrap`).
 
 **Code changes:**
 - `helper.rs`: `HelperClient::spawn()` replaced with `HelperClient::connect()` — simply opens `/var/run/fortivpn-helper.sock`
-- `fortivpn-helper/main.rs`: Accept socket fd from launchd (check `LAUNCH_DAEMON_SOCKET_NAME` env var or use `launch_activate_socket`) instead of binding its own socket
-- New `installer.rs`: First-launch detection and installation logic
-- `vpn.rs`: `ensure_helper()` simplified — just try connecting to the socket, no spawn logic
+- `fortivpn-helper/main.rs`: Use `launch_activate_socket("Listeners")` to receive the pre-created socket fd from launchd. Rust FFI binding: call the C function `launch_activate_socket` from `liblaunch` directly via `extern "C"` block (no crate needed — it's a single function call returning `*mut c_int` fds). Add `version` command handler. Add `getpeereid()` check on accept. Add 30-second idle timeout after last client disconnects.
+- New `installer.rs`: First-launch detection (try socket connect), version check, install/upgrade flow via osascript
+- `vpn.rs`: `ensure_helper()` simplified — just try connecting to the socket, trigger install if unavailable
+
+**Migration for existing users:** On first launch after update, the app detects the daemon is not installed (socket doesn't exist) and triggers the install flow. The old osascript-based helper code path is removed entirely.
 
 ### 2. Event-Driven Status Monitor
 
@@ -82,17 +100,23 @@ loop {
 }
 ```
 
-**New:**
-- `VpnSession` creates a `tokio::sync::watch<VpnEvent>` channel at connect time
-- `bridge.rs` sends a death event on the channel when:
-  - LCP echo misses exceed threshold (>3 missed)
-  - Bridge task exits unexpectedly
-  - TLS tunnel errors
-- `lib.rs` spawns a listener task at connect time that `await`s the channel — zero CPU until event arrives
-- When disconnected, no monitor task exists (zero energy)
-- `VpnSession::is_alive()` atomic flag remains for synchronous checks (CLI status queries)
+**New architecture:**
 
-**Energy savings:** 17,280 wake-ups/day reduced to zero when idle. When connected, wake-ups only occur on actual connection state changes.
+**Channel type and ownership:**
+- `VpnSession::connect()` creates a `tokio::sync::watch::Sender<VpnEvent>` and returns the `watch::Receiver` to the caller
+- `VpnEvent` enum: `Alive`, `Died(String)` (string = error reason)
+- The `watch::Sender` is passed into `start_bridge()` and stored alongside the `alive: Arc<AtomicBool>` in `BridgeHandle`
+- When bridge detects death (LCP echo timeout, task exit, TLS error), it sets `alive` to false AND sends `VpnEvent::Died(reason)` on the watch channel
+
+**Listener lifecycle:**
+- `lib.rs`: After a successful `connect()`, spawns a listener task that holds a clone of `AppHandle` and `await`s the `watch::Receiver`
+- When `VpnEvent::Died(reason)` is received: updates `VpnManager.status` to `Error(reason)`, calls `rebuild_tray()`, sends notification via Tauri notification API
+- The listener task's `JoinHandle` is stored in `VpnManager` and aborted on `disconnect()` — no orphan tasks
+- When disconnected, no monitor task exists (zero energy)
+
+**`VpnSession::is_alive()` atomic flag remains** for synchronous checks (CLI `fortivpn status` via IPC).
+
+**Energy savings:** 17,280 wake-ups/day reduced to zero when idle. When connected, wake-ups only on actual state changes.
 
 ### 3. Tauri Native Notifications
 
@@ -113,9 +137,11 @@ app.notification().builder().title(title).body(message).show();
 
 **Changes:**
 - Add `tauri-plugin-notification` to `Cargo.toml` dependencies
+- Add `"notification:default"` to Tauri capabilities in `tauri.conf.json`
 - `send_error_notification()` gains `app: &AppHandle` parameter
 - Update all call sites (already have `app` handle available)
-- Remove `build_notification_script()` helper function
+- Remove `build_notification_script()` helper function and its tests (`test_notification_script_*`)
+- `tauri-plugin-shell` remains — still needed for the one-time install flow osascript call in `installer.rs`
 
 ### 4. Inline Password Prompt on First Connect
 
@@ -123,30 +149,37 @@ When VPN password is not in Keychain, show a small dialog instead of requiring t
 
 **Flow:**
 1. `handle_connect()` calls `keychain::get_password(&profile.id)`
-2. If error (no password stored) → open a small password prompt window
-3. User enters password → saved to Keychain → `handle_connect()` retries
-4. Subsequent connects retrieve password from Keychain silently
+2. If error (no password stored) → open a password prompt window and return early
+3. User enters password in the prompt window → Tauri command saves to Keychain → emits a Tauri event `password-submitted` with profile ID and password
+4. A Tauri event listener in `lib.rs` receives the event → calls `handle_connect()` again (this time Keychain has the password)
+5. Subsequent connects retrieve password from Keychain silently
+
+**Async coordination:** The password prompt is not awaited inline. Instead, `handle_connect()` opens the window and returns. The prompt window's "Connect" button invokes a Tauri command that saves the password and emits an event. The event listener retriggers the connect flow. This avoids blocking async tasks on UI input.
+
+**Session-only passwords:** If "remember" is unchecked, the password is stored in a `HashMap<String, String>` (profile_id → password) on `VpnManager`. Cleared on disconnect or app exit. `handle_connect()` checks this map before Keychain.
 
 **Implementation:**
-- New `password-prompt.html` + `password-prompt.js` — minimal dialog (~300x150px)
+- New `src/password-prompt.html` + `src/password-prompt.js` — minimal dialog (~300x150px)
 - Tauri webview window with fields: password input, "Remember password" checkbox (default: checked), Connect/Cancel buttons
-- Tauri command `cmd_prompt_password_and_connect` — saves password if "remember" checked, then calls connect
-- If "remember" unchecked, password used for this session only (stored in memory, not Keychain)
+- New Tauri command `cmd_submit_password` — saves password to Keychain (or in-memory map) and emits `password-submitted` event
+- Password prompt is always scoped to a specific profile ID (passed as URL query param to the window)
 
 ## Files Affected
 
 | File | Change |
 |------|--------|
 | `src-tauri/crates/fortivpn/src/helper.rs` | `spawn()` → `connect()`, remove osascript logic |
-| `src-tauri/crates/fortivpn/src/bridge.rs` | Send death event on watch channel |
-| `src-tauri/crates/fortivpn/src/lib.rs` | Add watch channel to `VpnSession` |
-| `src-tauri/crates/fortivpn-helper/src/main.rs` | Accept launchd socket activation |
-| `src-tauri/src/lib.rs` | Remove polling loop, add channel listener, use Tauri notifications, add password prompt flow |
-| `src-tauri/src/vpn.rs` | Simplify `ensure_helper()`, add password-prompt fallback in connect |
-| `src-tauri/src/installer.rs` (new) | First-launch helper installation |
+| `src-tauri/crates/fortivpn/src/bridge.rs` | Accept `watch::Sender`, send death event on channel |
+| `src-tauri/crates/fortivpn/src/lib.rs` | Return `watch::Receiver` from `connect()`, add `VpnEvent` enum |
+| `src-tauri/crates/fortivpn-helper/src/main.rs` | `launch_activate_socket` FFI, `getpeereid` auth, `version` command, idle timeout |
+| `src-tauri/src/lib.rs` | Remove polling loop, add event listener spawning, use Tauri notifications, add password prompt flow, remove `build_notification_script` + tests |
+| `src-tauri/src/vpn.rs` | Simplify `ensure_helper()`, store listener `JoinHandle`, add session password map |
+| `src-tauri/src/installer.rs` (new) | First-launch detection, version check, install/upgrade flow |
 | `src/password-prompt.html` (new) | Password dialog UI |
 | `src/password-prompt.js` (new) | Password dialog logic |
 | `src-tauri/Cargo.toml` | Add `tauri-plugin-notification` |
+| `src-tauri/tauri.conf.json` | Add `notification:default` capability |
+| `com.fortivpn-tray.helper.plist` (new) | launchd daemon configuration |
 
 ## What Stays the Same
 
@@ -154,14 +187,20 @@ When VPN password is not in Keychain, show a small dialog instead of requiring t
 - Profile management (profile.rs, Settings UI)
 - Keychain integration (keychain.rs)
 - CLI companion (fortivpn-cli, IPC)
-- All existing tests
+
+## Test Impact
+
+- Remove `test_notification_script_*` tests (dead code after osascript removal)
+- Update any tests that reference `HelperClient::spawn()` → `HelperClient::connect()`
+- New tests for: `installer.rs` (detection logic), `VpnEvent` channel wiring, session password map, `getpeereid` auth
+- Existing protocol/bridge/VpnManager unit tests remain valid
 
 ## Expected Energy Impact
 
 | Metric | Before | After |
 |--------|--------|-------|
 | 12hr energy (Activity Monitor) | 127.38 | Near zero (idle), minimal (connected) |
-| osascript processes | Persistent child + per-notification | None |
+| osascript processes | Persistent child + per-notification | None (except one-time install) |
 | CPU wake-ups (disconnected) | Every 5 seconds | Zero |
 | CPU wake-ups (connected) | Every 5s (poll) + every 30s (LCP echo) | Only LCP echo (30s, required for health) |
 | Admin password prompts | Every helper spawn | Once at install |
