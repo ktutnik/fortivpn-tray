@@ -84,6 +84,14 @@ impl HelperClient {
         Ok(())
     }
 
+    /// Ask the helper to close the TUN device (prevents stale utun on reconnect).
+    pub fn destroy_tun(&mut self) -> Result<(), FortiError> {
+        let cmd = serde_json::json!({"cmd": "destroy_tun"});
+        self.send_cmd(&cmd)?;
+        self.read_response()?;
+        Ok(())
+    }
+
     /// Ask the helper to delete a route.
     pub fn delete_route(&mut self, dest: &str) -> Result<(), FortiError> {
         let cmd = serde_json::json!({

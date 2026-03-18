@@ -120,6 +120,9 @@ fn validate_peer(stream: &std::os::unix::net::UnixStream) -> bool {
 fn handle_client(stream: UnixStream) {
     let reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut writer = stream;
+    // Track TUN fds created for this client so they can be closed on disconnect.
+    // Without this, leaked TUN devices keep their IPs, causing routing conflicts on reconnect.
+    let mut tun_fds: Vec<RawFd> = Vec::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -146,7 +149,8 @@ fn handle_client(stream: UnixStream) {
                     Some(serde_json::json!({"version": HELPER_VERSION})),
                 );
             }
-            "create_tun" => handle_create_tun(&msg, &mut writer),
+            "create_tun" => handle_create_tun(&msg, &mut writer, &mut tun_fds),
+            "destroy_tun" => handle_destroy_tun(&mut writer, &mut tun_fds),
             "add_route" => handle_add_route(&msg, &mut writer),
             "delete_route" => handle_delete_route(&msg, &mut writer),
             "configure_dns" => handle_configure_dns(&msg, &mut writer),
@@ -160,6 +164,9 @@ fn handle_client(stream: UnixStream) {
             }
         }
     }
+
+    // Client disconnected — close any leaked TUN devices
+    close_tun_fds(&mut tun_fds);
 }
 
 fn send_ok(writer: &mut UnixStream, extra: Option<serde_json::Value>) -> std::io::Result<()> {
@@ -185,7 +192,20 @@ fn send_error(writer: &mut UnixStream, msg: &str) -> std::io::Result<()> {
     writer.flush()
 }
 
-fn handle_create_tun(msg: &serde_json::Value, writer: &mut UnixStream) {
+fn close_tun_fds(tun_fds: &mut Vec<RawFd>) {
+    for fd in tun_fds.drain(..) {
+        unsafe { libc::close(fd); }
+    }
+}
+
+fn handle_destroy_tun(writer: &mut UnixStream, tun_fds: &mut Vec<RawFd>) {
+    close_tun_fds(tun_fds);
+    let _ = send_ok(writer, None);
+}
+
+fn handle_create_tun(msg: &serde_json::Value, writer: &mut UnixStream, tun_fds: &mut Vec<RawFd>) {
+    // Close any previous TUN devices before creating a new one
+    close_tun_fds(tun_fds);
     let ip: std::net::Ipv4Addr = match msg["ip"].as_str().and_then(|s| s.parse().ok()) {
         Some(ip) => ip,
         None => {
@@ -230,8 +250,12 @@ fn handle_create_tun(msg: &serde_json::Value, writer: &mut UnixStream) {
         return;
     }
 
-    // Keep the device alive by leaking it (the fd is now owned by the parent)
+    // Keep the TUN alive by holding the fd — close it on disconnect or next create_tun.
+    // The fd was sent to the app via SCM_RIGHTS (dup'd by kernel), so both sides hold a ref.
+    // We must keep ours open to prevent macOS from destroying the utun device.
+    let fd = dev.as_raw_fd();
     std::mem::forget(dev);
+    tun_fds.push(fd);
 
     let _ = send_ok(writer, Some(serde_json::json!({"tun_name": tun_name})));
 }

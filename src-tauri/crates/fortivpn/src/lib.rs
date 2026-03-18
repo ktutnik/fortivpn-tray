@@ -174,7 +174,7 @@ impl VpnSession {
     }
 
     /// Disconnect: stop tunnel, restore routes, send logout.
-    pub async fn disconnect(&mut self, helper: Option<&mut helper::HelperClient>) {
+    pub async fn disconnect(&mut self, mut helper: Option<&mut helper::HelperClient>) {
         // Signal bridge tasks to stop
         self.shutdown.notify_waiters();
 
@@ -185,9 +185,14 @@ impl VpnSession {
 
         // Restore routes via helper
         if let Some(ref mut rm) = self.route_manager {
-            rm.restore_via_helper(helper);
+            rm.restore_via_helper(helper.as_deref_mut());
         }
         self.route_manager = None;
+
+        // Close the TUN device in the helper to prevent stale utun on reconnect
+        if let Some(ref mut h) = helper {
+            let _ = h.destroy_tun();
+        }
 
         // Send logout request (best-effort)
         let host = self.host.clone();
