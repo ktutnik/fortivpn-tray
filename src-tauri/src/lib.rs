@@ -1,7 +1,6 @@
 mod installer;
 mod ipc;
 mod keychain;
-mod nap;
 mod profile;
 mod vpn;
 
@@ -471,8 +470,6 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
     if let Err(e) = &result {
         eprintln!("VPN connect error: {e}");
         send_error_notification(app, "FortiVPN Connection Failed", e);
-    } else {
-        nap::disable_app_nap();
     }
 
     // Rebuild menu with updated state
@@ -506,7 +503,6 @@ pub(crate) async fn handle_connect(app: &tauri::AppHandle, profile_id: &str) {
                                 let mut vpn_lock = vpn.lock().await;
                                 vpn_lock.handle_session_death(reason.clone()).await;
                             }
-                            nap::enable_app_nap();
                             // Send notification and rebuild tray (outside VPN lock)
                             send_error_notification(&app_handle, "FortiVPN Disconnected", &reason);
                             {
@@ -532,8 +528,6 @@ pub(crate) async fn handle_disconnect(app: &tauri::AppHandle) {
         let mut vpn_lock = vpn.lock().await;
         let _ = vpn_lock.disconnect().await;
     }
-
-    nap::enable_app_nap();
 
     // Rebuild menu
     {
