@@ -16,7 +16,7 @@ A macOS menu bar app for connecting to FortiGate SSL-VPN. Built with Tauri 2 (Ru
 ## Project Structure
 
 ```
-src-tauri/
+src/
   src/
     lib.rs         — App setup, tray menu, Tauri commands, window management
     vpn.rs         — VPN connection lifecycle (connect/disconnect/check_alive)
@@ -95,7 +95,7 @@ src/
 ## Build & Run
 
 ```bash
-cd src-tauri
+cd src
 cargo build --release        # Build all binaries
 cargo test --workspace       # Run all tests
 cargo tauri build            # Full release build with .app and .dmg
@@ -105,7 +105,7 @@ cargo tauri dev              # Dev mode with hot reload
 ### CLI companion
 ```bash
 cargo build --release --bin fortivpn
-sudo cp src-tauri/target/release/fortivpn /usr/local/bin/
+sudo cp src/target/release/fortivpn /usr/local/bin/
 ```
 
 ### CLI Usage
@@ -154,4 +154,4 @@ chore: update dependencies
 - The app hides from Dock using `NSApplicationActivationPolicy::Accessory` — must be set AFTER Tauri init
 - macOS Menu Bar settings can accumulate ghost entries from dev builds — use "Reset Control Center..." in System Settings to clean up
 - `keyring` crate stores passwords differently than `security` CLI — always use `fortivpn set-password` or the Settings UI to update passwords
-- Helper binary is embedded at `src-tauri/crates/fortivpn-helper` — it must be built and accessible for VPN connections to work
+- Helper binary is embedded at `src/crates/fortivpn-helper` — it must be built and accessible for VPN connections to work

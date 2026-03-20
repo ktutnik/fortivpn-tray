@@ -37,24 +37,30 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src-tauri/**/Cargo.lock') }}
+            src/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src/**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+      - name: Build release
+        working-directory: src
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build Tauri app
-        working-directory: src-tauri
-        env:
-          APPLE_SIGNING_IDENTITY: "-"
-        run: cargo tauri build --target ${{ matrix.target }}
+      - name: Create .app bundle
+        working-directory: src
+        run: bash scripts/bundle-app.sh
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "FortiVPN Tray" \
+            -srcfolder "src/target/release/bundle/FortiVPN Tray.app" \
+            -ov -format UDZO \
+            "fortivpn-tray-${{ matrix.target }}.dmg"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fortivpn-tray-${{ matrix.target }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: "*.dmg"
           if-no-files-found: error
 
   release:
@@ -68,7 +74,6 @@ jobs:
 
       - name: Generate release notes from commits
         run: |
-          # Find the previous tag
           PREV_TAG=$(git tag --sort=-version:refname | head -n 2 | tail -n 1)
           if [ -z "$PREV_TAG" ]; then
             RANGE="HEAD"
@@ -76,7 +81,6 @@ jobs:
             RANGE="${PREV_TAG}..HEAD"
           fi
 
-          # Categorize conventional commits
           FEATS=""
           FIXES=""
           REFACTORS=""
@@ -97,13 +101,12 @@ jobs:
             elif echo "$MSG" | grep -qE '^docs(\(.*\))?!?:'; then
               DOCS="${DOCS}\n- ${MSG#*: }"
             elif echo "$MSG" | grep -qE '^(chore|ci|test)(\(.*\))?!?:'; then
-              : # skip chore/ci/test from release notes
+              :
             else
               OTHERS="${OTHERS}\n- ${MSG}"
             fi
           done < <(git log "$RANGE" --oneline --no-merges)
 
-          # Build release notes
           NOTES=""
           if [ -n "$FEATS" ]; then
             NOTES="${NOTES}## Features\n${FEATS}\n\n"

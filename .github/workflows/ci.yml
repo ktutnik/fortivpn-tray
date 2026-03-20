@@ -27,18 +27,18 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/**/Cargo.lock') }}
+            src/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src/**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        working-directory: src-tauri
+        working-directory: src
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        working-directory: src-tauri
+        working-directory: src
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        working-directory: src-tauri
+        working-directory: src
         run: cargo test --workspace

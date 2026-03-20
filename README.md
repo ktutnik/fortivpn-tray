@@ -1,17 +1,17 @@
 <p align="center">
-  <img src="src-tauri/icons/icon.png" width="128" height="128" alt="FortiVPN Tray icon">
+  <img src="src/icons/icon.png" width="128" height="128" alt="FortiVPN Tray icon">
 </p>
 
 <h1 align="center">FortiVPN Tray</h1>
 
 <p align="center">
-  A lightweight system tray app for FortiGate SSL-VPN — built with Rust and Tauri v2.
+  A lightweight system tray app for FortiGate SSL-VPN — built natively in Rust.
 </p>
 
 <p align="center">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white">
-  <img alt="Tauri" src="https://img.shields.io/badge/Tauri_v2-24C8D8?style=flat&logo=tauri&logoColor=white">
+
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
 </p>
 
@@ -32,7 +32,7 @@ FortiVPN Tray takes a different approach — a **lightweight system tray app** t
 
 ```mermaid
 graph TD
-    subgraph app["Menu Bar App (Tauri v2 + Rust)"]
+    subgraph app["Menu Bar App (Rust + tao)"]
         tray["Tray UI Menu"]
         settings["Settings Window"]
         cli["CLI (Unix Socket IPC)"]
@@ -78,7 +78,7 @@ graph TD
 ### Workspace Structure
 
 ```
-src-tauri/
+src/
 ├── src/                      # Tauri app (tray menu, IPC, profiles)
 ├── crates/
 │   ├── fortivpn/             # Core VPN library (protocol, auth, tunneling)
@@ -113,7 +113,7 @@ cargo install create-tauri-app
 ## Build
 
 ```bash
-cd src-tauri
+cd src
 cargo build --release
 ```
 
