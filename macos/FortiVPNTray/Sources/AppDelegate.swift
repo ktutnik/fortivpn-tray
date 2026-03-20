@@ -36,7 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let item = NSMenuItem(title: "\u{25CB} \(profile.name) \u{2014} Connect", action: #selector(doConnect(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = profile
-                item.isEnabled = !state.isConnected
+                item.isEnabled = !state.isBusy
                 menu.addItem(item)
             }
         }

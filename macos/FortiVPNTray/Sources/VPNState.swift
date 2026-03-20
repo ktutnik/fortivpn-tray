@@ -6,6 +6,7 @@ class VPNState: ObservableObject {
     @Published var status: String = "disconnected"
     @Published var connectedProfile: String? = nil
     var isConnected: Bool { status == "connected" }
+    var isBusy: Bool { status == "connecting" || status == "disconnecting" || status == "connected" }
 
     let client = DaemonClient()
     private var pollTimer: Timer?
