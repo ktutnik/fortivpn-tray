@@ -1,6 +1,9 @@
 #!/bin/bash
-# Create a macOS .app bundle from the release binary
+# Build and create a macOS .app bundle
 set -e
+
+# Build all workspace binaries
+cargo build --release --workspace
 
 APP_NAME="FortiVPN Tray"
 BUNDLE_DIR="target/release/bundle/${APP_NAME}.app"
@@ -14,7 +17,7 @@ mkdir -p "${CONTENTS}/Resources"
 cp target/release/fortivpn-tray "${CONTENTS}/MacOS/"
 
 # Copy helper binary
-cp target/release/fortivpn-helper "${CONTENTS}/Resources/" 2>/dev/null || true
+cp target/release/fortivpn-helper "${CONTENTS}/Resources/"
 
 # Copy Info.plist
 cp resources/Info.plist "${CONTENTS}/"
