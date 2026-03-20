@@ -11,7 +11,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "shield", accessibilityDescription: "VPN")
+            button.image = loadTrayIcon(connected: false)
             button.image?.isTemplate = true
         }
 
@@ -67,8 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Update icon
         if let button = self.statusItem.button {
-            let symbolName = state.isConnected ? "shield.fill" : "shield"
-            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "VPN")
+            button.image = loadTrayIcon(connected: state.isConnected)
             button.image?.isTemplate = true
         }
     }
@@ -171,6 +170,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func loadTrayIcon(connected: Bool) -> NSImage? {
+        let name = connected ? "vpn-connected" : "vpn-disconnected"
+        // Look in bundle Resources first, then next to executable
+        if let path = Bundle.main.path(forResource: name, ofType: "png") {
+            let img = NSImage(contentsOfFile: path)
+            img?.size = NSSize(width: 18, height: 18)
+            return img
+        }
+        // Fallback to SF Symbol
+        return NSImage(systemSymbolName: connected ? "shield.fill" : "shield", accessibilityDescription: "VPN")
     }
 
     func ensureDaemonRunning() {

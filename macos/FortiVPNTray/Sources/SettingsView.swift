@@ -59,6 +59,12 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 550, minHeight: 400)
-        .onAppear { state.refresh() }
+        .onAppear {
+            state.refresh()
+            // Auto-select first profile
+            if selectedProfileId == nil, let first = state.profiles.first {
+                selectedProfileId = first.id
+            }
+        }
     }
 }

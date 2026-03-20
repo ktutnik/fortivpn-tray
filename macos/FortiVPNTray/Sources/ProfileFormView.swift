@@ -65,20 +65,26 @@ struct ProfileFormView: View {
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItemGroup {
+        .safeAreaInset(edge: .bottom) {
+            HStack {
                 if isEditing {
-                    Button("Delete", role: .destructive) {
+                    Button("Delete") {
                         guard let id = profile?.id else { return }
                         _ = state.client.deleteProfile(id: id)
                         onDone()
                     }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
                 }
+                Spacer()
                 Button(isEditing ? "Save" : "Create") {
                     saveProfile()
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
         .onAppear { loadProfile() }
         .onChange(of: profile) { _ in loadProfile() }
