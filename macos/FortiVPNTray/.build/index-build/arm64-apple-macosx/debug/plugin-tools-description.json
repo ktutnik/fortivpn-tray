@@ -1,0 +1,281 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.FortiVPNTray-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/sources",
+      "importPath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/AppDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/DaemonClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/ProfileFormView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/VPNState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "FortiVPNTray",
+      "moduleOutputPath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/Modules/FortiVPNTray.swiftmodule",
+      "objects" : [
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView.swift.o",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-I",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-L",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-plugin-path",
+        "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "fortivpntray"
+      ],
+      "outputFileMapPath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/Modules/FortiVPNTray.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/App.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/AppDelegate.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/DaemonClient.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/Models.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/ProfileFormView.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/SettingsView.swift",
+        "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/VPNState.swift"
+      ],
+      "tempsPath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "FortiVPNTray" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "FortiVPNTray",
+      "-package-name",
+      "fortivpntray",
+      "-c",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/App.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/AppDelegate.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/DaemonClient.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/Models.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/ProfileFormView.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/SettingsView.swift",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/VPNState.swift",
+      "-I",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-I",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-L",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-plugin-path",
+      "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "fortivpntray",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "FortiVPNTray" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/AppDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/DaemonClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/ProfileFormView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/VPNState.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/sources"
+    },
+    "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}

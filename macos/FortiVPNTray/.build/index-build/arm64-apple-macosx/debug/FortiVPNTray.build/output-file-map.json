@@ -1,0 +1,54 @@
+{
+  "": {
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/master.swiftdeps"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/App.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/App.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/AppDelegate.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/AppDelegate.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/DaemonClient.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/DaemonClient.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/Models.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/Models.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/ProfileFormView.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/ProfileFormView.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/SettingsView.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/SettingsView.dia"
+  },
+  "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/Sources/VPNState.swift": {
+    "dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState.d",
+    "object": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState.swift.o",
+    "swiftmodule": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState~partial.swiftmodule",
+    "swift-dependencies": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState.swiftdeps",
+    "diagnostics": "/Users/ktutnik/Documents/fortivpn-tray/.worktrees/swift-ui/macos/FortiVPNTray/.build/index-build/arm64-apple-macosx/debug/FortiVPNTray.build/VPNState.dia"
+  }
+}
