@@ -25,6 +25,8 @@ cp target/release/fortivpn-helper "${CONTENTS}/Resources/" 2>/dev/null || true
 # Copy resources
 cp resources/Info.plist "${CONTENTS}/"
 cp icons/icon.icns "${CONTENTS}/Resources/"
+cp icons/vpn-connected.png "${CONTENTS}/Resources/"
+cp icons/vpn-disconnected.png "${CONTENTS}/Resources/"
 cp resources/com.fortivpn-tray.helper.plist "${CONTENTS}/Resources/"
 
 # Update Info.plist to point to the Swift binary as the main executable

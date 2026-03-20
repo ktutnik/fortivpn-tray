@@ -7,31 +7,39 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selectedProfileId) {
-                Section("Profiles") {
-                    ForEach(state.profiles) { profile in
-                        HStack {
-                            Circle()
-                                .fill(profile.hasPassword ? .green : .red)
-                                .frame(width: 8, height: 8)
-                            Text(profile.name)
+            VStack(spacing: 0) {
+                List(selection: $selectedProfileId) {
+                    Section("Profiles") {
+                        ForEach(state.profiles) { profile in
+                            HStack {
+                                Circle()
+                                    .fill(profile.hasPassword ? .green : .red)
+                                    .frame(width: 8, height: 8)
+                                Text(profile.name)
+                            }
+                            .tag(profile.id)
                         }
-                        .tag(profile.id)
                     }
                 }
+                .listStyle(.sidebar)
+
+                Divider()
+                Button(action: {
+                    isCreatingNew = true
+                    selectedProfileId = nil
+                }) {
+                    HStack {
+                        Image(systemName: "plus")
+                        Text("New Profile")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
-            .listStyle(.sidebar)
             .frame(minWidth: 160)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: {
-                        isCreatingNew = true
-                        selectedProfileId = nil
-                    }) {
-                        Label("New Profile", systemImage: "plus")
-                    }
-                }
-            }
             .onChange(of: selectedProfileId) { _ in
                 isCreatingNew = false
             }
