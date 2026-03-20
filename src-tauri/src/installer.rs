@@ -26,9 +26,9 @@ pub fn needs_upgrade(bundled_version: &str) -> bool {
 }
 
 /// Install or upgrade the helper daemon. Prompts for admin password once.
-pub fn install_helper(app: &tauri::AppHandle) -> Result<(), String> {
-    let helper_src = find_bundled_helper(app)?;
-    let plist_src = find_bundled_plist(app)?;
+pub fn install_helper() -> Result<(), String> {
+    let helper_src = find_bundled_helper()?;
+    let plist_src = find_bundled_plist()?;
 
     let script = format!(
         r#"do shell script "
@@ -68,43 +68,42 @@ pub fn install_helper(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn find_bundled_helper(app: &tauri::AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Resource dir: {e}"))?;
-
-    for name in &[
-        "fortivpn-helper",
-        "fortivpn-helper-aarch64-apple-darwin",
-        "fortivpn-helper-x86_64-apple-darwin",
-    ] {
-        let path = resource_dir.join("binaries").join(name);
-        if path.exists() {
-            return Ok(path.to_string_lossy().to_string());
-        }
-    }
-
+fn find_bundled_helper() -> Result<String, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // .app bundle: Contents/MacOS/../Resources/
+            if let Some(parent) = dir.parent() {
+                let rd = parent.join("Resources");
+                for name in &["fortivpn-helper", "fortivpn-helper-aarch64-apple-darwin", "fortivpn-helper-x86_64-apple-darwin"] {
+                    let path = rd.join(name);
+                    if path.exists() {
+                        return Ok(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+            // Next to executable (dev builds)
             let path = dir.join("fortivpn-helper");
             if path.exists() {
                 return Ok(path.to_string_lossy().to_string());
             }
         }
     }
-
     Err("Bundled helper binary not found".to_string())
 }
 
-fn find_bundled_plist(app: &tauri::AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Resource dir: {e}"))?;
-    let path = resource_dir.join("com.fortivpn-tray.helper.plist");
+fn find_bundled_plist() -> Result<String, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(parent) = dir.parent() {
+                let path = parent.join("Resources").join("com.fortivpn-tray.helper.plist");
+                if path.exists() {
+                    return Ok(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    // Dev: relative to working directory
+    let path = std::path::Path::new("resources/com.fortivpn-tray.helper.plist");
     if path.exists() {
         return Ok(path.to_string_lossy().to_string());
     }

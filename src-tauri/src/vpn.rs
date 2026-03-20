@@ -18,7 +18,7 @@ pub struct VpnManager {
     pub(crate) session: Option<VpnSession>,
     helper: Option<HelperClient>,
     pub(crate) connected_profile_id: Option<String>,
-    pub(crate) monitor_handle: Option<tauri::async_runtime::JoinHandle<()>>,
+    pub(crate) monitor_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) session_passwords: HashMap<String, String>,
 }
 
