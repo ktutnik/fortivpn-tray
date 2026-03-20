@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let state = VPNState()
     var settingsWindow: NSWindow?
@@ -16,16 +16,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         state.startPolling()
-        rebuildMenu()
 
+        // Create initial menu with delegate — menu rebuilds on every click
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+
+        // Update tray icon periodically
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.rebuildMenu()
+            guard let self = self else { return }
+            if let button = self.statusItem.button {
+                button.image = self.loadTrayIcon(connected: self.state.isConnected)
+                button.image?.isTemplate = true
+            }
         }
     }
 
-    func rebuildMenu() {
-        let menu = NSMenu()
+    // Rebuild menu fresh every time the user clicks the tray icon
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        state.refresh()
+        menu.removeAllItems()
+        populateMenu(menu)
+    }
 
+    func populateMenu(_ menu: NSMenu) {
         for profile in state.profiles {
             let connected = state.isConnected && state.connectedProfile == profile.name
             if connected {
@@ -63,13 +77,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        self.statusItem.menu = menu
-
-        // Update icon
-        if let button = self.statusItem.button {
-            button.image = loadTrayIcon(connected: state.isConnected)
-            button.image?.isTemplate = true
-        }
     }
 
     @objc func doConnect(_ sender: NSMenuItem) {
@@ -84,7 +91,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let resp = self?.state.client.connectVPN(name: profile.name)
             DispatchQueue.main.async {
                 self?.state.refresh()
-                self?.rebuildMenu()
                 if resp?.ok != true {
                     let alert = NSAlert()
                     alert.messageText = "Connection Failed"
@@ -101,7 +107,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             _ = self?.state.client.disconnectVPN()
             DispatchQueue.main.async {
                 self?.state.refresh()
-                self?.rebuildMenu()
             }
         }
     }
@@ -166,7 +171,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 _ = self?.state.client.connectVPN(name: profile.name)
                 DispatchQueue.main.async {
                     self?.state.refresh()
-                    self?.rebuildMenu()
                 }
             }
         }
