@@ -5,13 +5,14 @@ mod keychain;
 mod native_ui;
 mod notification;
 mod profile;
+mod settings_webview;
 mod vpn;
 
 use std::sync::{Arc, Mutex};
 
 use app::{AppEvent, AppState};
 use muda::MenuEvent;
-use tao::event::Event;
+use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::TrayIconBuilder;
 
@@ -62,7 +63,7 @@ fn main() {
         .build()
         .expect("Failed to build tray icon");
 
-    // Hide from Dock
+    // Hide from Dock (tray-only app)
     #[cfg(target_os = "macos")]
     {
         use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
@@ -76,8 +77,17 @@ fn main() {
     let menu_rx = MenuEvent::receiver();
 
     // Run macOS event loop (ControlFlow::Wait = sleep until event, near-zero CPU)
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::Wait;
+
+        // Handle window close (settings window red X button)
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = &event
+        {
+            settings_webview::close_settings();
+        }
 
         // Handle tray menu clicks
         if let Ok(menu_event) = menu_rx.try_recv() {
@@ -95,10 +105,7 @@ fn main() {
                     app::handle_disconnect(&st).await;
                 });
             } else if id == "settings" {
-                #[cfg(target_os = "macos")]
-                if let Some(mtm) = objc2::MainThreadMarker::new() {
-                    native_ui::open_settings(mtm, &state);
-                }
+                settings_webview::open_settings(&state, event_loop_target);
             } else if id == "quit" {
                 let st = state.clone();
                 rt.block_on(async {
