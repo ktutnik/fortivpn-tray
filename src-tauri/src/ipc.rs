@@ -4,11 +4,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
-use tauri::Manager;
-
+use crate::app::{self, AppState};
 use crate::profile::ProfileStore;
 use crate::vpn::VpnStatus;
-use crate::{handle_connect, handle_disconnect, StoreState, VpnState};
 
 pub fn socket_path() -> PathBuf {
     dirs::config_dir()
@@ -39,67 +37,63 @@ pub struct IpcResponse {
     pub data: Option<serde_json::Value>,
 }
 
-pub fn start_ipc_server(app_handle: tauri::AppHandle) {
+pub async fn start_ipc_server(state: AppState) {
     let sock = socket_path();
 
     // Remove stale socket
     let _ = std::fs::remove_file(&sock);
 
-    tauri::async_runtime::spawn(async move {
-        let listener = match UnixListener::bind(&sock) {
-            Ok(l) => l,
+    let listener = match UnixListener::bind(&sock) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("IPC: failed to bind socket: {e}");
+            return;
+        }
+    };
+
+    // Make socket accessible
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sock, PermissionsExt::from_mode(0o600));
+    }
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
             Err(e) => {
-                eprintln!("IPC: failed to bind socket: {e}");
-                return;
+                eprintln!("IPC: accept error: {e}");
+                continue;
             }
         };
 
-        // Make socket accessible
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&sock, PermissionsExt::from_mode(0o600));
-        }
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
 
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("IPC: accept error: {e}");
-                    continue;
-                }
-            };
-
-            let app = app_handle.clone();
-            tokio::spawn(async move {
-                let (reader, mut writer) = stream.into_split();
-                let mut reader = BufReader::new(reader);
-                let mut line = String::new();
-
-                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                    let cmd = line.trim().to_string();
-                    let response = handle_ipc_command(&app, &cmd).await;
-                    let json = serde_json::to_string(&response).unwrap_or_default();
-                    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-                    let _ = writer.flush().await;
-                    line.clear();
-                }
-            });
-        }
-    });
+            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                let cmd = line.trim().to_string();
+                let response = handle_ipc_command(&state_clone, &cmd).await;
+                let json = serde_json::to_string(&response).unwrap_or_default();
+                let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+                let _ = writer.flush().await;
+                line.clear();
+            }
+        });
+    }
 }
 
-async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
+async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     let command = parts[0];
     let arg = parts.get(1).map(|s| s.trim());
 
     match command {
         "status" => {
-            let vpn = app.state::<VpnState>();
-            let vpn_lock = vpn.lock().await;
-            let store = app.state::<StoreState>();
-            let store_lock = store.lock().unwrap();
+            let vpn_lock = state.vpn.lock().await;
+            let store_lock = state.store.lock().unwrap();
 
             let (status_str, profile_name) = match &vpn_lock.status {
                 VpnStatus::Disconnected => ("disconnected".to_string(), None),
@@ -129,8 +123,7 @@ async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
         }
 
         "list" => {
-            let store = app.state::<StoreState>();
-            let store_lock = store.lock().unwrap();
+            let store_lock = state.store.lock().unwrap();
             let profiles: Vec<ProfileInfo> = store_lock
                 .profiles
                 .iter()
@@ -160,8 +153,7 @@ async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
 
             // Find profile by name (case-insensitive) or ID
             let profile_id = {
-                let store = app.state::<StoreState>();
-                let store_lock = store.lock().unwrap();
+                let store_lock = state.store.lock().unwrap();
                 find_profile(&store_lock, arg)
             };
 
@@ -173,11 +165,10 @@ async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
                 };
             };
 
-            handle_connect(app, &profile_id).await;
+            app::handle_connect(state, &profile_id).await;
 
             // Check result
-            let vpn = app.state::<VpnState>();
-            let vpn_lock = vpn.lock().await;
+            let vpn_lock = state.vpn.lock().await;
             match &vpn_lock.status {
                 VpnStatus::Connected => IpcResponse {
                     ok: true,
@@ -198,7 +189,7 @@ async fn handle_ipc_command(app: &tauri::AppHandle, cmd: &str) -> IpcResponse {
         }
 
         "disconnect" => {
-            handle_disconnect(app).await;
+            app::handle_disconnect(state).await;
 
             IpcResponse {
                 ok: true,
