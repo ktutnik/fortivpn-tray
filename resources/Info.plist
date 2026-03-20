@@ -13,7 +13,7 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
-    <string>fortivpn-tray</string>
+    <string>FortiVPN Tray</string>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>CFBundlePackageType</key>
