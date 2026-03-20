@@ -202,15 +202,24 @@ Unlike IPsec VPNs which operate at the network layer and require special firewal
 
 ### The Big Picture
 
-```
-Your Laptop                          Corporate Network
-┌─────────────┐                     ┌─────────────────────┐
-│             │                     │                     │
-│  App ──► TUN ──── TLS Tunnel ────── FortiGate ──► Internal
-│  (browser,  │     (encrypted)     │  Gateway     Servers
-│   ssh, etc) │     over internet   │  (10.0.0.1)  (10.x.x.x)
-│             │                     │                     │
-└─────────────┘                     └─────────────────────┘
+```mermaid
+graph LR
+    subgraph laptop["Your Laptop"]
+        app["Apps<br/>(browser, ssh, etc)"]
+        tun["TUN Device<br/>(virtual interface)"]
+        app --> tun
+    end
+
+    subgraph corp["Corporate Network"]
+        gw["FortiGate<br/>Gateway<br/>(10.0.0.1)"]
+        srv["Internal<br/>Servers<br/>(10.x.x.x)"]
+        gw --> srv
+    end
+
+    tun -- "TLS Tunnel<br/>(encrypted over internet)" --> gw
+
+    style laptop fill:#0ea5e9,stroke:#0284c7,color:#fff
+    style corp fill:#7c3aed,stroke:#6d28d9,color:#fff
 ```
 
 When connected, your laptop gets a **virtual IP address** on the corporate network (e.g., `10.212.134.5`). All traffic destined for the corporate network is routed through a **TUN device** (a virtual network interface), encrypted via TLS, and sent to the FortiGate gateway which decrypts it and forwards it to the internal servers. Responses travel the same path back.
@@ -221,18 +230,20 @@ FortiVPN Tray implements the full FortiGate SSL-VPN client protocol in Rust. Her
 
 #### Phase 1: TLS Authentication
 
-```
-Client                              FortiGate Gateway
-  │                                       │
-  ├─── TLS Handshake (port 443) ─────────►│
-  │    (verify server certificate)         │
-  │                                        │
-  ├─── POST /remote/logincheck ──────────►│
-  │    username=alice&credential=s3cret    │
-  │                                        │
-  │◄── Set-Cookie: SVPNCOOKIE=abc123... ──┤
-  │    (+ XML config with routes, DNS)     │
-  │                                        │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as FortiGate Gateway
+
+    C->>G: TLS Handshake (port 443)
+    Note over C: Verify server certificate
+    G-->>C: TLS Established
+
+    C->>G: POST /remote/logincheck
+    Note over C,G: username=alice&credential=s3cret
+
+    G-->>C: Set-Cookie: SVPNCOOKIE=abc123...
+    Note over G: + XML config (routes, DNS, assigned IP)
 ```
 
 The client connects to the gateway over TLS, then authenticates via an HTTP POST request with username and password. On success, the gateway returns an `SVPNCOOKIE` (a session token) and an XML configuration containing:
@@ -246,28 +257,44 @@ A **TUN device** (`utun`) is a virtual network interface that operates at the IP
 
 Creating a TUN device requires **root privileges**. FortiVPN Tray uses a separate privileged helper process (managed by macOS `launchd`) that creates the TUN device and passes the file descriptor back to the unprivileged main app using `SCM_RIGHTS` — a Unix mechanism for sending open file descriptors between processes.
 
+```mermaid
+sequenceDiagram
+    participant App as FortiVPN Tray<br/>(unprivileged)
+    participant H as Helper Daemon<br/>(root, launchd)
+    participant K as macOS Kernel
+
+    App->>H: {"cmd": "create_tun", "ip": "10.212.134.5"}
+    H->>K: Create utun device
+    K-->>H: utun5 (fd=7)
+    H-->>App: Send fd via SCM_RIGHTS
+    Note over App: Now owns TUN device<br/>without ever being root
+    H-->>App: {"ok": true, "tun_name": "utun5"}
+```
+
 #### Phase 3: PPP Negotiation
 
-```
-Client                              FortiGate Gateway
-  │                                       │
-  ├─── HTTP GET /remote/sslvpn-tunnel ──►│
-  │    Cookie: SVPNCOOKIE=abc123...       │
-  │                                        │
-  │◄── HTTP/1.1 200 (keep connection) ────┤
-  │                                        │
-  ├─── LCP Configure-Request ────────────►│
-  │    (MRU=1354, Magic=0xabcd1234)       │
-  │◄── LCP Configure-Ack ────────────────┤
-  │                                        │
-  ├─── IPCP Configure-Request ───────────►│
-  │    (request IP, DNS)                   │
-  │◄── IPCP Configure-Nak ───────────────┤
-  │    (here's your IP: 10.212.134.5)     │
-  ├─── IPCP Configure-Request ───────────►│
-  │    (accept 10.212.134.5)              │
-  │◄── IPCP Configure-Ack ───────────────┤
-  │                                        │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as FortiGate Gateway
+
+    C->>G: GET /remote/sslvpn-tunnel
+    Note over C,G: Cookie: SVPNCOOKIE=abc123...
+    G-->>C: HTTP/1.1 200 (keep connection open)
+
+    rect rgb(230, 240, 255)
+        Note over C,G: LCP (Link Control Protocol)
+        C->>G: LCP Configure-Request (MRU=1354, Magic=0xabcd)
+        G-->>C: LCP Configure-Ack
+    end
+
+    rect rgb(230, 255, 240)
+        Note over C,G: IPCP (IP Control Protocol)
+        C->>G: IPCP Configure-Request (request IP, DNS)
+        G-->>C: IPCP Configure-Nak (your IP: 10.212.134.5)
+        C->>G: IPCP Configure-Request (accept 10.212.134.5)
+        G-->>C: IPCP Configure-Ack
+    end
 ```
 
 After authentication, a second TLS connection opens the actual VPN tunnel via HTTP. Inside this connection, FortiGate uses **PPP (Point-to-Point Protocol)** to negotiate:
@@ -280,15 +307,26 @@ PPP frames are wrapped inside FortiGate's proprietary framing format (a 6-byte h
 
 Once PPP negotiation completes, the client runs an **async IP bridge** — two concurrent loops:
 
-```
-                    ┌──────────────────────────────┐
-                    │       Encrypted TLS Tunnel    │
-                    │                                │
- App traffic ──►  TUN  ──► PPP frame ──► TLS write ──► FortiGate
-                  Device                              Gateway
- App traffic ◄──  TUN  ◄── PPP frame ◄── TLS read  ◄── FortiGate
-                    │                                │
-                    └──────────────────────────────┘
+```mermaid
+graph LR
+    subgraph outbound["Outbound (app → corporate)"]
+        direction LR
+        A1["App Traffic"] --> T1["TUN Device"]
+        T1 --> P1["PPP Frame"]
+        P1 --> E1["TLS Encrypt"]
+        E1 --> G1["FortiGate"]
+    end
+
+    subgraph inbound["Inbound (corporate → app)"]
+        direction RL
+        G2["FortiGate"] --> D2["TLS Decrypt"]
+        D2 --> P2["PPP Frame"]
+        P2 --> T2["TUN Device"]
+        T2 --> A2["App Traffic"]
+    end
+
+    style outbound fill:#dbeafe,stroke:#2563eb
+    style inbound fill:#dcfce7,stroke:#16a34a
 ```
 
 - **TUN → Tunnel**: Read raw IP packets from the TUN device, wrap them in PPP frames with FortiGate's header, encrypt via TLS, and send to the gateway.
@@ -300,33 +338,53 @@ The bridge also handles **LCP Echo** keep-alive messages — the gateway sends p
 
 With the tunnel running, the client configures the OS routing table so that traffic to corporate networks goes through the TUN device:
 
-**Split tunnel** (specific routes):
-```bash
-# Only route corporate networks through VPN
-route add 10.0.0.0/8 via 10.212.134.5    # Corporate range
-route add 172.16.0.0/12 via 10.212.134.5  # Corporate range
+```mermaid
+graph TD
+    subgraph split["Split Tunnel (specific routes)"]
+        direction LR
+        S1["10.0.0.0/8"] --> TUN1["TUN → VPN"]
+        S2["172.16.0.0/12"] --> TUN1
+        S3["All other traffic"] --> WAN1["Wi-Fi → Internet"]
+    end
+
+    subgraph full["Full Tunnel (all traffic)"]
+        direction LR
+        F1["0.0.0.0/1"] --> TUN2["TUN → VPN"]
+        F2["128.0.0.0/1"] --> TUN2
+        F3["Gateway host route"] --> WAN2["Wi-Fi → Internet"]
+    end
+
+    style split fill:#dbeafe,stroke:#2563eb
+    style full fill:#fef3c7,stroke:#d97706
 ```
 
-**Full tunnel** (all traffic):
-```bash
-# Route ALL traffic through VPN using two broad routes
-# (covers entire IPv4 space without replacing default route)
-route add 0.0.0.0/1 via 10.212.134.5
-route add 128.0.0.0/1 via 10.212.134.5
-```
+**Split tunnel** routes only corporate IP ranges through the VPN. All other traffic (web browsing, streaming) goes directly through your normal internet connection.
 
-Additionally, a **host route** to the gateway's public IP is added via the original default gateway, so the encrypted tunnel traffic itself doesn't get routed back into the VPN (which would create a loop).
+**Full tunnel** routes all IPv4 traffic through the VPN using two broad routes (`0.0.0.0/1` + `128.0.0.0/1`) that cover the entire address space without replacing the actual default route.
+
+A **host route** to the gateway's public IP is always added via the original default gateway, so the encrypted tunnel traffic itself doesn't get routed back into the VPN (which would create a loop).
 
 DNS is configured via macOS `scutil` to use the corporate DNS servers for resolving internal hostnames like `jira.corp.com` or `git.internal`.
 
 #### Phase 6: Disconnect
 
-On disconnect, the client:
-1. Signals the bridge tasks to stop
-2. Restores original routes and DNS configuration
-3. Re-enables IPv6 on all interfaces
-4. Sends an HTTP logout request to the gateway (clean session termination)
-5. Closes the TLS connection
+```mermaid
+sequenceDiagram
+    participant App as Client
+    participant H as Helper (root)
+    participant G as FortiGate Gateway
+
+    App->>App: Signal bridge tasks to stop
+    App->>H: Delete routes (via helper)
+    App->>H: Restore DNS
+    App->>H: Close TUN device
+    App->>App: Re-enable IPv6
+    App->>G: GET /remote/logout (session cleanup)
+    G-->>App: 200 OK
+    App->>App: Close TLS connection
+
+    Note over H: Helper stays alive<br/>for next connection
+```
 
 The helper daemon stays alive for the next connection — no admin password prompt needed.
 
