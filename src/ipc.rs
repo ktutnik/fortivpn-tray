@@ -198,10 +198,81 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             }
         }
 
+        "get_profiles" => {
+            let store = state.store.lock().unwrap();
+            let profiles: Vec<serde_json::Value> = store.profiles.iter().map(|p| {
+                let has_pw = crate::keychain::get_password(&p.id).is_ok();
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "host": p.host,
+                    "port": p.port,
+                    "username": p.username,
+                    "trusted_cert": p.trusted_cert,
+                    "has_password": has_pw,
+                })
+            }).collect();
+            IpcResponse { ok: true, message: "ok".into(), data: Some(serde_json::to_value(profiles).unwrap()) }
+        }
+
+        "save_profile" => {
+            let Some(json_str) = arg else {
+                return IpcResponse { ok: false, message: "Usage: save_profile <json>".into(), data: None };
+            };
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) else {
+                return IpcResponse { ok: false, message: "Invalid JSON".into(), data: None };
+            };
+            let id = data["id"].as_str().filter(|s| !s.is_empty()).map(String::from)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let profile = crate::profile::VpnProfile {
+                id: id.clone(),
+                name: data["name"].as_str().unwrap_or("").to_string(),
+                host: data["host"].as_str().unwrap_or("").to_string(),
+                port: data["port"].as_u64().unwrap_or(443) as u16,
+                username: data["username"].as_str().unwrap_or("").to_string(),
+                trusted_cert: data["trusted_cert"].as_str().unwrap_or("").to_string(),
+            };
+            let mut store = state.store.lock().unwrap();
+            if store.get(&id).is_some() { store.update(profile); } else { store.add(profile); }
+            IpcResponse { ok: true, message: "Saved".into(), data: Some(serde_json::json!({"id": id})) }
+        }
+
+        "delete_profile" => {
+            let Some(id) = arg else {
+                return IpcResponse { ok: false, message: "Usage: delete_profile <id>".into(), data: None };
+            };
+            let mut store = state.store.lock().unwrap();
+            store.remove(id);
+            let _ = crate::keychain::delete_password(id);
+            IpcResponse { ok: true, message: "Deleted".into(), data: None }
+        }
+
+        "set_password" => {
+            let Some(args_str) = arg else {
+                return IpcResponse { ok: false, message: "Usage: set_password <id> <password>".into(), data: None };
+            };
+            let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                return IpcResponse { ok: false, message: "Usage: set_password <id> <password>".into(), data: None };
+            }
+            match crate::keychain::store_password(parts[0], parts[1]) {
+                Ok(_) => IpcResponse { ok: true, message: "Password saved".into(), data: None },
+                Err(e) => IpcResponse { ok: false, message: format!("Error: {e}"), data: None },
+            }
+        }
+
+        "has_password" => {
+            let Some(id) = arg else {
+                return IpcResponse { ok: false, message: "Usage: has_password <id>".into(), data: None };
+            };
+            let has = crate::keychain::get_password(id).is_ok();
+            IpcResponse { ok: true, message: "ok".into(), data: Some(serde_json::json!({"has_password": has})) }
+        }
+
         _ => IpcResponse {
             ok: false,
             message: format!(
-                "Unknown command: {command}. Available: status, list, connect <name>, disconnect"
+                "Unknown command: {command}. Available: status, list, connect, disconnect, get_profiles, save_profile, delete_profile, set_password, has_password"
             ),
             data: None,
         },
