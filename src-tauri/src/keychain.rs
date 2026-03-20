@@ -18,7 +18,6 @@ pub fn get_password(profile_id: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to retrieve password: {e}"))
 }
 
-#[allow(dead_code)]
 pub fn delete_password(profile_id: &str) -> Result<(), String> {
     let entry = Entry::new(SERVICE_NAME, profile_id)
         .map_err(|e| format!("Failed to create keychain entry: {e}"))?;

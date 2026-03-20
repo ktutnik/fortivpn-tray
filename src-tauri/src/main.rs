@@ -97,7 +97,7 @@ fn main() {
             } else if id == "settings" {
                 #[cfg(target_os = "macos")]
                 if let Some(mtm) = objc2::MainThreadMarker::new() {
-                    native_ui::open_settings(mtm);
+                    native_ui::open_settings(mtm, &state);
                 }
             } else if id == "quit" {
                 let st = state.clone();
