@@ -1,12 +1,21 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
-use crate::app::{self, AppState};
 use crate::profile::ProfileStore;
-use crate::vpn::VpnStatus;
+use crate::vpn::{VpnManager, VpnStatus};
+
+pub type VpnState = Arc<tokio::sync::Mutex<VpnManager>>;
+pub type StoreState = Arc<Mutex<ProfileStore>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub vpn: VpnState,
+    pub store: StoreState,
+}
 
 pub fn socket_path() -> PathBuf {
     dirs::config_dir()
@@ -165,32 +174,90 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                 };
             };
 
-            app::handle_connect(state, &profile_id).await;
+            let profile = {
+                let store = state.store.lock().unwrap();
+                store.get(&profile_id).cloned()
+            };
 
-            // Check result
-            let vpn_lock = state.vpn.lock().await;
-            match &vpn_lock.status {
-                VpnStatus::Connected => IpcResponse {
-                    ok: true,
-                    message: "Connected".into(),
-                    data: None,
-                },
-                VpnStatus::Error(e) => IpcResponse {
+            let Some(profile) = profile else {
+                return IpcResponse {
                     ok: false,
-                    message: format!("Failed: {e}"),
+                    message: "Profile not found".into(),
                     data: None,
-                },
-                other => IpcResponse {
-                    ok: true,
-                    message: format!("Status: {other:?}"),
-                    data: None,
-                },
+                };
+            };
+
+            // Check password
+            {
+                let vpn = state.vpn.lock().await;
+                if vpn.get_password(&profile.id).is_err() {
+                    return IpcResponse {
+                        ok: false,
+                        message: "No password set for this profile".into(),
+                        data: None,
+                    };
+                }
+            }
+
+            // Connect
+            let result = {
+                let mut vpn = state.vpn.lock().await;
+                vpn.connect(&profile).await
+            };
+
+            match result {
+                Ok(()) => {
+                    // Spawn event monitor for session death
+                    let st = state.clone();
+                    {
+                        let mut vpn = state.vpn.lock().await;
+                        if let Some(ref mut session) = vpn.session {
+                            if let Some(event_rx) = session.take_event_rx() {
+                                let handle = tokio::spawn(async move {
+                                    let mut rx = event_rx;
+                                    loop {
+                                        if rx.changed().await.is_err() {
+                                            break;
+                                        }
+                                        let event = rx.borrow().clone();
+                                        if let fortivpn::VpnEvent::Died(ref reason) = event {
+                                            let reason = reason.clone();
+                                            {
+                                                let mut vpn = st.vpn.lock().await;
+                                                vpn.handle_session_death(reason.clone()).await;
+                                            }
+                                            crate::notification::send_notification(
+                                                "FortiVPN Disconnected",
+                                                &reason,
+                                            );
+                                            break;
+                                        }
+                                    }
+                                });
+                                vpn.monitor_handle = Some(handle);
+                            }
+                        }
+                    }
+                    IpcResponse {
+                        ok: true,
+                        message: "Connected".into(),
+                        data: None,
+                    }
+                }
+                Err(e) => {
+                    crate::notification::send_notification("FortiVPN Connection Failed", &e);
+                    IpcResponse {
+                        ok: false,
+                        message: format!("Failed: {e}"),
+                        data: None,
+                    }
+                }
             }
         }
 
         "disconnect" => {
-            app::handle_disconnect(state).await;
-
+            let mut vpn = state.vpn.lock().await;
+            let _ = vpn.disconnect().await;
             IpcResponse {
                 ok: true,
                 message: "Disconnected".into(),
@@ -200,29 +267,48 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
 
         "get_profiles" => {
             let store = state.store.lock().unwrap();
-            let profiles: Vec<serde_json::Value> = store.profiles.iter().map(|p| {
-                let has_pw = crate::keychain::get_password(&p.id).is_ok();
-                serde_json::json!({
-                    "id": p.id,
-                    "name": p.name,
-                    "host": p.host,
-                    "port": p.port,
-                    "username": p.username,
-                    "trusted_cert": p.trusted_cert,
-                    "has_password": has_pw,
+            let profiles: Vec<serde_json::Value> = store
+                .profiles
+                .iter()
+                .map(|p| {
+                    let has_pw = crate::keychain::get_password(&p.id).is_ok();
+                    serde_json::json!({
+                        "id": p.id,
+                        "name": p.name,
+                        "host": p.host,
+                        "port": p.port,
+                        "username": p.username,
+                        "trusted_cert": p.trusted_cert,
+                        "has_password": has_pw,
+                    })
                 })
-            }).collect();
-            IpcResponse { ok: true, message: "ok".into(), data: Some(serde_json::to_value(profiles).unwrap()) }
+                .collect();
+            IpcResponse {
+                ok: true,
+                message: "ok".into(),
+                data: Some(serde_json::to_value(profiles).unwrap()),
+            }
         }
 
         "save_profile" => {
             let Some(json_str) = arg else {
-                return IpcResponse { ok: false, message: "Usage: save_profile <json>".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: save_profile <json>".into(),
+                    data: None,
+                };
             };
             let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) else {
-                return IpcResponse { ok: false, message: "Invalid JSON".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Invalid JSON".into(),
+                    data: None,
+                };
             };
-            let id = data["id"].as_str().filter(|s| !s.is_empty()).map(String::from)
+            let id = data["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let profile = crate::profile::VpnProfile {
                 id: id.clone(),
@@ -233,40 +319,80 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                 trusted_cert: data["trusted_cert"].as_str().unwrap_or("").to_string(),
             };
             let mut store = state.store.lock().unwrap();
-            if store.get(&id).is_some() { store.update(profile); } else { store.add(profile); }
-            IpcResponse { ok: true, message: "Saved".into(), data: Some(serde_json::json!({"id": id})) }
+            if store.get(&id).is_some() {
+                store.update(profile);
+            } else {
+                store.add(profile);
+            }
+            IpcResponse {
+                ok: true,
+                message: "Saved".into(),
+                data: Some(serde_json::json!({"id": id})),
+            }
         }
 
         "delete_profile" => {
             let Some(id) = arg else {
-                return IpcResponse { ok: false, message: "Usage: delete_profile <id>".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: delete_profile <id>".into(),
+                    data: None,
+                };
             };
             let mut store = state.store.lock().unwrap();
             store.remove(id);
             let _ = crate::keychain::delete_password(id);
-            IpcResponse { ok: true, message: "Deleted".into(), data: None }
+            IpcResponse {
+                ok: true,
+                message: "Deleted".into(),
+                data: None,
+            }
         }
 
         "set_password" => {
             let Some(args_str) = arg else {
-                return IpcResponse { ok: false, message: "Usage: set_password <id> <password>".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: set_password <id> <password>".into(),
+                    data: None,
+                };
             };
             let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
             if parts.len() != 2 {
-                return IpcResponse { ok: false, message: "Usage: set_password <id> <password>".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: set_password <id> <password>".into(),
+                    data: None,
+                };
             }
             match crate::keychain::store_password(parts[0], parts[1]) {
-                Ok(_) => IpcResponse { ok: true, message: "Password saved".into(), data: None },
-                Err(e) => IpcResponse { ok: false, message: format!("Error: {e}"), data: None },
+                Ok(()) => IpcResponse {
+                    ok: true,
+                    message: "Password saved".into(),
+                    data: None,
+                },
+                Err(e) => IpcResponse {
+                    ok: false,
+                    message: format!("Error: {e}"),
+                    data: None,
+                },
             }
         }
 
         "has_password" => {
             let Some(id) = arg else {
-                return IpcResponse { ok: false, message: "Usage: has_password <id>".into(), data: None };
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: has_password <id>".into(),
+                    data: None,
+                };
             };
             let has = crate::keychain::get_password(id).is_ok();
-            IpcResponse { ok: true, message: "ok".into(), data: Some(serde_json::json!({"has_password": has})) }
+            IpcResponse {
+                ok: true,
+                message: "ok".into(),
+                data: Some(serde_json::json!({"has_password": has})),
+            }
         }
 
         _ => IpcResponse {
@@ -300,6 +426,7 @@ fn find_profile(store: &ProfileStore, query: &str) -> Option<String> {
         .map(|p| p.id.clone())
 }
 
+#[allow(dead_code)]
 pub fn cleanup_socket() {
     let _ = std::fs::remove_file(socket_path());
 }

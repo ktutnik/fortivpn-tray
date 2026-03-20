@@ -2,9 +2,9 @@
 members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cli"]
 
 [package]
-name = "fortivpn-tray"
+name = "fortivpn-daemon"
 version = "0.1.0"
-description = "A native macOS system tray app for FortiGate SSL-VPN"
+description = "A headless daemon for FortiGate SSL-VPN (IPC over Unix socket)"
 authors = ["you"]
 edition = "2021"
 
@@ -12,17 +12,6 @@ edition = "2021"
 
 [dependencies]
 fortivpn = { path = "crates/fortivpn" }
-
-# System tray
-tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
-tray-icon = "0.21"
-muda = "0.17"
-
-# Webview (on-demand, only when Settings is open)
-wry = "0.49"
-
-# Image loading for tray icons
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Notifications
 notify-rust = "4"
@@ -37,17 +26,6 @@ keyring = { version = "3", features = ["apple-native"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 
-# macOS native APIs
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = [
-    "NSAlert", "NSApplication", "NSRunningApplication", "NSWindow", "NSView",
-    "NSTextField", "NSSecureTextField", "NSButton", "NSControl",
-    "NSText", "NSResponder", "NSPanel", "NSImage",
-] }
-objc2-foundation = { version = "0.3", features = [
-    "NSString", "NSGeometry", "NSThread", "NSData",
-] }
-
 [[bin]]
-name = "fortivpn-tray"
+name = "fortivpn-daemon"
 path = "src/main.rs"
