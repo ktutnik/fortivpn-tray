@@ -4,8 +4,9 @@ class DaemonClient {
     private let socketPath: String
 
     init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        socketPath = "\(home)/.config/fortivpn-tray/ipc.sock"
+        // Use Application Support (same as Rust's dirs::config_dir() on macOS)
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        socketPath = appSupport.appendingPathComponent("fortivpn-tray/ipc.sock").path
     }
 
     /// Send a command and return the raw JSON response
