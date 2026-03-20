@@ -1,6 +1,7 @@
 mod installer;
 mod ipc;
 mod keychain;
+mod native_ui;
 mod profile;
 mod vpn;
 
