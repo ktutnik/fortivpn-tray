@@ -37,22 +37,20 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src/target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('src/**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release
-        working-directory: src
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Create .app bundle
-        working-directory: src
         run: bash scripts/bundle-app.sh
 
       - name: Create DMG
         run: |
           hdiutil create -volname "FortiVPN Tray" \
-            -srcfolder "src/target/release/bundle/FortiVPN Tray.app" \
+            -srcfolder "target/release/bundle/FortiVPN Tray.app" \
             -ov -format UDZO \
             "fortivpn-tray-${{ matrix.target }}.dmg"
 

@@ -78,32 +78,34 @@ graph TD
 
 - **Secure credential storage** — VPN passwords are stored in macOS Keychain, never on disk.
 
-### Workspace Structure
+### Project Structure
 
 ```
-src/
+fortivpn-tray/
 ├── src/
-│   ├── main.rs            # App entry point (tao event loop, tray icon)
-│   ├── app.rs             # Shared state, tray menu, connect/disconnect handlers
-│   ├── settings_webview.rs # On-demand WKWebView settings window
-│   ├── native_ui.rs       # Native NSAlert password prompt
-│   ├── notification.rs    # Desktop notifications (notify-rust)
-│   ├── vpn.rs             # VPN connection lifecycle
-│   ├── profile.rs         # Profile CRUD, JSON persistence
-│   ├── keychain.rs        # macOS Keychain read/write/delete
-│   ├── ipc.rs             # Unix socket IPC server for CLI
-│   └── installer.rs       # Helper daemon installation
+│   ├── main.rs              # App entry point (tao event loop, tray icon)
+│   ├── app.rs               # Shared state, tray menu, connect/disconnect handlers
+│   ├── settings_webview.rs  # On-demand WKWebView settings window
+│   ├── native_ui.rs         # Native NSAlert password prompt
+│   ├── notification.rs      # Desktop notifications (notify-rust)
+│   ├── vpn.rs               # VPN connection lifecycle
+│   ├── profile.rs           # Profile CRUD, JSON persistence
+│   ├── keychain.rs          # macOS Keychain read/write/delete
+│   ├── ipc.rs               # Unix socket IPC server for CLI
+│   └── installer.rs         # Helper daemon installation
 ├── crates/
-│   ├── fortivpn/          # Core VPN library (protocol, auth, tunneling)
-│   ├── fortivpn-helper/   # Privileged helper binary (TUN + routing)
-│   └── fortivpn-cli/      # CLI companion tool
+│   ├── fortivpn/            # Core VPN library (protocol, auth, tunneling)
+│   ├── fortivpn-helper/     # Privileged helper binary (TUN + routing)
+│   └── fortivpn-cli/        # CLI companion tool
 ├── resources/
-│   ├── settings/index.html # Settings UI (HTML/CSS/JS)
-│   ├── Info.plist          # macOS app bundle metadata
-│   └── com.fortivpn-tray.helper.plist # launchd daemon config
+│   ├── settings/index.html  # Settings UI (HTML/CSS/JS)
+│   ├── Info.plist           # macOS app bundle metadata
+│   └── com.fortivpn-tray.helper.plist  # launchd daemon config
 ├── scripts/
-│   └── bundle-app.sh      # Create .app bundle from release build
-└── icons/                  # App and tray icons
+│   └── bundle-app.sh        # Create .app bundle from release build
+├── icons/                    # App and tray icons
+├── Cargo.toml               # Workspace root
+└── build.rs                  # Build script (helper binary)
 ```
 
 ## Features
@@ -130,7 +132,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ## Build
 
 ```bash
-cd src
 cargo build --release
 bash scripts/bundle-app.sh
 ```

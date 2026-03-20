@@ -27,18 +27,15 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src/**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        working-directory: src
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        working-directory: src
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        working-directory: src
         run: cargo test --workspace

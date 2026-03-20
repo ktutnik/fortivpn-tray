@@ -95,11 +95,9 @@ src/
 ## Build & Run
 
 ```bash
-cd src
 cargo build --release        # Build all binaries
 cargo test --workspace       # Run all tests
-cargo tauri build            # Full release build with .app and .dmg
-cargo tauri dev              # Dev mode with hot reload
+bash scripts/bundle-app.sh   # Create .app bundle
 ```
 
 ### CLI companion
