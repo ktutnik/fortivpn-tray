@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use image::GenericImageView;
 use muda::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon};
 
