@@ -4,32 +4,47 @@ members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cl
 [package]
 name = "fortivpn-tray"
 version = "0.1.0"
-description = "A Tauri App"
+description = "A native macOS system tray app for FortiGate SSL-VPN"
 authors = ["you"]
 edition = "2021"
-default-run = "fortivpn-tray"
-
-[lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "fortivpn_tray_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
 
 [dependencies]
 fortivpn = { path = "crates/fortivpn" }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-shell = "2"
-tauri-plugin-notification = "2"
+
+# System tray
+tao = { version = "0.34", default-features = false }
+tray-icon = "0.21"
+muda = "0.17"
+
+# Image loading for tray icons
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Notifications
+notify-rust = "4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Data & serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 keyring = { version = "3", features = ["apple-native"] }
-tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "net"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
+
+# macOS native APIs
 objc2 = "0.6"
-urlencoding = "2"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSRunningApplication", "NSWindow", "NSView",
+    "NSTextField", "NSSecureTextField", "NSButton", "NSControl",
+    "NSText", "NSResponder", "NSPanel",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSGeometry", "NSThread",
+] }
+
+[[bin]]
+name = "fortivpn-tray"
+path = "src/main.rs"

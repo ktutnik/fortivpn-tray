@@ -49,5 +49,4 @@ fn main() {
         panic!("Failed to copy helper from {src} to {dst}: {e}");
     });
 
-    tauri_build::build()
 }
