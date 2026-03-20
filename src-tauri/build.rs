@@ -48,6 +48,4 @@ fn main() {
     std::fs::copy(&src, &dst).unwrap_or_else(|e| {
         panic!("Failed to copy helper from {src} to {dst}: {e}");
     });
-
-    tauri_build::build()
 }
