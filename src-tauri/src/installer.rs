@@ -74,7 +74,11 @@ fn find_bundled_helper() -> Result<String, String> {
             // .app bundle: Contents/MacOS/../Resources/
             if let Some(parent) = dir.parent() {
                 let rd = parent.join("Resources");
-                for name in &["fortivpn-helper", "fortivpn-helper-aarch64-apple-darwin", "fortivpn-helper-x86_64-apple-darwin"] {
+                for name in &[
+                    "fortivpn-helper",
+                    "fortivpn-helper-aarch64-apple-darwin",
+                    "fortivpn-helper-x86_64-apple-darwin",
+                ] {
                     let path = rd.join(name);
                     if path.exists() {
                         return Ok(path.to_string_lossy().to_string());
@@ -95,7 +99,9 @@ fn find_bundled_plist() -> Result<String, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(parent) = dir.parent() {
-                let path = parent.join("Resources").join("com.fortivpn-tray.helper.plist");
+                let path = parent
+                    .join("Resources")
+                    .join("com.fortivpn-tray.helper.plist");
                 if path.exists() {
                     return Ok(path.to_string_lossy().to_string());
                 }

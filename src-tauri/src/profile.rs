@@ -36,17 +36,20 @@ impl ProfileStore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn save(&self) {
         let path = Self::config_path();
         let data = serde_json::to_string_pretty(self).expect("Failed to serialize profiles");
         fs::write(path, data).expect("Failed to write profiles");
     }
 
+    #[allow(dead_code)]
     pub fn add(&mut self, profile: VpnProfile) {
         self.profiles.push(profile);
         self.save();
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, id: &str) {
         self.profiles.retain(|p| p.id != id);
         self.save();
@@ -56,6 +59,7 @@ impl ProfileStore {
         self.profiles.iter().find(|p| p.id == id)
     }
 
+    #[allow(dead_code)]
     pub fn update(&mut self, profile: VpnProfile) {
         if let Some(existing) = self.profiles.iter_mut().find(|p| p.id == profile.id) {
             *existing = profile;

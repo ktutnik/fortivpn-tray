@@ -6,6 +6,7 @@ use objc2_foundation::{NSRect, NSString};
 pub struct PasswordResult {
     pub profile_id: String,
     pub password: String,
+    #[allow(dead_code)]
     pub remember: bool,
 }
 

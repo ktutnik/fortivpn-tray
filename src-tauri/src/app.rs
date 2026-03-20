@@ -60,8 +60,8 @@ pub fn build_tray_menu(state: &AppState) -> Menu {
     let store = state.store.lock().unwrap();
 
     for p in &store.profiles {
-        let is_connected = vpn.connected_profile_id() == Some(p.id.as_str())
-            && vpn.status == VpnStatus::Connected;
+        let is_connected =
+            vpn.connected_profile_id() == Some(p.id.as_str()) && vpn.status == VpnStatus::Connected;
         if is_connected {
             let _ = menu.append(&MenuItem::with_id(
                 format!("disconnect:{}", p.id),
@@ -118,7 +118,7 @@ pub fn build_tray_menu(state: &AppState) -> Menu {
 
 pub fn rebuild_tray(tray: &TrayIcon, state: &AppState) {
     let menu = build_tray_menu(state);
-    let _ = tray.set_menu(Some(Box::new(menu)));
+    tray.set_menu(Some(Box::new(menu)));
 
     let vpn = state.vpn.blocking_lock();
     let icon_bytes: &[u8] = if vpn.status == VpnStatus::Connected {
@@ -232,7 +232,10 @@ mod tests {
 
     #[test]
     fn test_wrap_text_long() {
-        let lines = wrap_text("this is a very long error message that should be wrapped", 20);
+        let lines = wrap_text(
+            "this is a very long error message that should be wrapped",
+            20,
+        );
         assert!(lines.len() > 1);
         for line in &lines {
             assert!(line.len() <= 25); // some tolerance for word boundaries

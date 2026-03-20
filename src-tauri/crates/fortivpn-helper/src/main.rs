@@ -194,7 +194,9 @@ fn send_error(writer: &mut UnixStream, msg: &str) -> std::io::Result<()> {
 
 fn close_tun_fds(tun_fds: &mut Vec<RawFd>) {
     for fd in tun_fds.drain(..) {
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
     }
 }
 

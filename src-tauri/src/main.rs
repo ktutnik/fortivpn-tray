@@ -123,13 +123,10 @@ fn main() {
                         let pid = profile_id.clone();
                         let pname = profile_name.clone();
                         if let Some(mtm) = objc2::MainThreadMarker::new() {
-                            if let Some(result) =
-                                native_ui::show_password_prompt(mtm, &pid, &pname)
+                            if let Some(result) = native_ui::show_password_prompt(mtm, &pid, &pname)
                             {
-                                let _ = keychain::store_password(
-                                    &result.profile_id,
-                                    &result.password,
-                                );
+                                let _ =
+                                    keychain::store_password(&result.profile_id, &result.password);
                                 // Retrigger connect
                                 let st = state.clone();
                                 let pid = result.profile_id.clone();
