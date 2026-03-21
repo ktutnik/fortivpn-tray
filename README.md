@@ -26,6 +26,144 @@ Connecting to a FortiGate SSL-VPN usually means either running the heavy FortiCl
 
 FortiVPN Tray takes a different approach — a **lightweight system tray app** that implements the FortiGate SSL-VPN protocol natively in Rust. No subprocess wrapping, no kernel extensions, no bloat. Just click to connect.
 
+## Features
+
+- One-click connect/disconnect from the system tray
+- Near-zero battery drain when idle (no polling, no WebKit)
+- Native SwiftUI settings with dark mode support
+- Native password prompt on first connect
+- Multiple VPN profile support
+- CLI companion for terminal workflows
+- Secure credential storage (macOS Keychain)
+- Native desktop notifications
+- IPv6 leak prevention
+- No external VPN binaries required
+
+## Installation
+
+### Why Build from Source?
+
+FortiVPN Tray is distributed as source code rather than a pre-built binary. This is intentional:
+
+- **No Apple Developer Account** — Distributing a signed `.dmg` or publishing to the Mac App Store requires a paid Apple Developer Program membership ($99/year). Without code signing, macOS Gatekeeper blocks downloaded binaries with "app is damaged" or "unidentified developer" warnings that are difficult to bypass.
+- **Transparency** — A VPN app handles all your network traffic. Building from source lets you inspect exactly what the code does before trusting it with your data.
+- **No notarization workarounds** — Unsigned apps downloaded from the internet require users to manually bypass Gatekeeper via System Settings, which is a poor experience. Building locally avoids this entirely since locally-built apps are trusted by macOS.
+
+### Prerequisites
+
+- [Rust toolchain](https://rustup.rs/)
+- Xcode Command Line Tools (for Swift compiler)
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+xcode-select --install
+```
+
+### Quick Install
+
+Clone and run the install script:
+
+```bash
+git clone https://github.com/ktutnik/fortivpn-tray.git
+cd fortivpn-tray
+./install.sh
+```
+
+This will:
+1. Build the Rust daemon and helper
+2. Build the Swift UI app
+3. Assemble the `.app` bundle
+4. Copy to `/Applications`
+5. Install the privileged helper daemon (prompts for admin password once)
+6. Launch the app
+
+### Manual Install
+
+If you prefer to build step by step:
+
+```bash
+# Build everything
+bash scripts/bundle-app.sh
+
+# Copy app to Applications
+cp -r "target/release/bundle/FortiVPN Tray.app" /Applications/
+
+# Install privileged helper daemon (one-time, requires admin password)
+sudo bash -c '
+cp target/release/fortivpn-helper /Library/PrivilegedHelperTools/fortivpn-helper &&
+chmod 755 /Library/PrivilegedHelperTools/fortivpn-helper &&
+chown root:wheel /Library/PrivilegedHelperTools/fortivpn-helper &&
+cp resources/com.fortivpn-tray.helper.plist /Library/LaunchDaemons/ &&
+chown root:wheel /Library/LaunchDaemons/com.fortivpn-tray.helper.plist &&
+launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null;
+launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
+'
+
+# Launch
+open "/Applications/FortiVPN Tray.app"
+```
+
+### Updating
+
+Pull the latest changes and re-run the install script:
+
+```bash
+git pull
+./install.sh
+```
+
+### Uninstall
+
+```bash
+# Remove app
+rm -rf "/Applications/FortiVPN Tray.app"
+
+# Remove helper daemon
+sudo bash -c '
+launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null
+rm -f /Library/PrivilegedHelperTools/fortivpn-helper
+rm -f /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
+'
+
+# Remove config and profiles (optional)
+rm -rf ~/Library/Application\ Support/fortivpn-tray
+```
+
+## Usage
+
+### System Tray
+
+1. Launch **FortiVPN Tray** from Applications
+2. Click the shield icon in the menu bar
+3. Open **Settings** to add a VPN profile (host, port, username, certificate fingerprint)
+4. Click a profile to connect — enter your VPN password when prompted
+5. Click again to disconnect
+
+### CLI
+
+The CLI controls the VPN through the daemon via a Unix socket.
+
+```bash
+fortivpn status              # Show connection status
+fortivpn list                # List profiles
+fortivpn connect <name>      # Connect to a profile
+fortivpn disconnect          # Disconnect
+```
+
+Short aliases: `s` = status, `l` = list, `c` = connect, `d` = disconnect
+
+Profile matching is case-insensitive and partial — `sg` matches "My SG VPN".
+
+> The tray app must be running for the CLI to work.
+
+## Data Storage
+
+| Data | Location |
+|------|----------|
+| Profiles | `~/Library/Application Support/fortivpn-tray/profiles.json` |
+| Passwords | macOS Keychain (service: `fortivpn-tray`) |
+| IPC Socket | `~/Library/Application Support/fortivpn-tray/ipc.sock` |
+
 ## Design
 
 ### Architecture
@@ -130,98 +268,11 @@ fortivpn-tray/
 ├── resources/
 │   ├── Info.plist               # macOS app bundle metadata
 │   └── com.fortivpn-tray.helper.plist  # launchd daemon config
-├── scripts/
-│   └── bundle-app.sh            # Build + assemble .app bundle
 ├── icons/                        # App and tray icons
+├── install.sh                    # One-command build + install
 ├── Cargo.toml                    # Rust workspace root
 └── build.rs                      # Build script (helper binary)
 ```
-
-## Features
-
-- One-click connect/disconnect from the system tray
-- Near-zero battery drain when idle (no polling, no WebKit)
-- Native SwiftUI settings with dark mode support
-- Native password prompt on first connect
-- Multiple VPN profile support
-- CLI companion for terminal workflows
-- Secure credential storage (macOS Keychain)
-- Native desktop notifications
-- IPv6 leak prevention
-- No external VPN binaries required
-
-## Prerequisites
-
-- [Rust toolchain](https://rustup.rs/)
-- Xcode Command Line Tools (for Swift)
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-xcode-select --install
-```
-
-## Build
-
-```bash
-bash scripts/bundle-app.sh
-```
-
-This builds both the Rust daemon and Swift app, then assembles them into a macOS `.app` bundle:
-- `target/release/bundle/FortiVPN Tray.app` — the macOS app bundle
-- `target/release/fortivpn` — the CLI companion
-
-### Install
-
-```bash
-# Copy app to Applications
-cp -r "target/release/bundle/FortiVPN Tray.app" /Applications/
-
-# Install privileged helper daemon
-sudo bash -c '
-cp target/release/fortivpn-helper /Library/PrivilegedHelperTools/fortivpn-helper &&
-chmod 755 /Library/PrivilegedHelperTools/fortivpn-helper &&
-chown root:wheel /Library/PrivilegedHelperTools/fortivpn-helper &&
-cp resources/com.fortivpn-tray.helper.plist /Library/LaunchDaemons/ &&
-chown root:wheel /Library/LaunchDaemons/com.fortivpn-tray.helper.plist &&
-launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null;
-launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
-'
-```
-
-## Usage
-
-### System Tray
-
-1. Launch **FortiVPN Tray** from Applications
-2. Click the shield icon in the menu bar
-3. Open **Settings** to add a VPN profile (host, port, username, certificate fingerprint)
-4. Click a profile to connect — enter your VPN password when prompted
-5. Click again to disconnect
-
-### CLI
-
-The CLI controls the VPN through the daemon via a Unix socket.
-
-```bash
-fortivpn status              # Show connection status
-fortivpn list                # List profiles
-fortivpn connect <name>      # Connect to a profile
-fortivpn disconnect          # Disconnect
-```
-
-Short aliases: `s` = status, `l` = list, `c` = connect, `d` = disconnect
-
-Profile matching is case-insensitive and partial — `sg` matches "My SG VPN".
-
-> The tray app must be running for the CLI to work.
-
-## Data Storage
-
-| Data | Location |
-|------|----------|
-| Profiles | `~/Library/Application Support/fortivpn-tray/profiles.json` |
-| Passwords | macOS Keychain (service: `fortivpn-tray`) |
-| IPC Socket | `~/Library/Application Support/fortivpn-tray/ipc.sock` |
 
 ## How FortiGate SSL-VPN Works
 
