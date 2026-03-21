@@ -1,15 +1,16 @@
 <p align="center">
-  <img src="src/icons/icon.png" width="128" height="128" alt="FortiVPN Tray icon">
+  <img src="icons/icon.png" width="128" height="128" alt="FortiVPN Tray icon">
 </p>
 
 <h1 align="center">FortiVPN Tray</h1>
 
 <p align="center">
-  A lightweight macOS system tray app for FortiGate SSL-VPN — built natively in Rust.
+  A lightweight macOS system tray app for FortiGate SSL-VPN — built with Swift and Rust.
 </p>
 
 <p align="center">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white">
+  <img alt="Swift" src="https://img.shields.io/badge/Swift-F05138?style=flat&logo=swift&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
 </p>
@@ -29,16 +30,36 @@ FortiVPN Tray takes a different approach — a **lightweight system tray app** t
 
 ### Architecture
 
+The app follows the **Tailscale pattern** — a native Swift UI app communicating with a Rust daemon over a Unix socket.
+
 ```mermaid
 graph TD
-    subgraph app["Menu Bar App (Rust + tao)"]
-        tray["Tray Menu (muda)"]
-        settings["Settings (on-demand WKWebView)"]
-        cli["CLI (Unix Socket IPC)"]
-        tray & settings & cli --> vpn["VPN Manager"]
+    subgraph swift["Swift App (native macOS UI)"]
+        tray["NSStatusItem (tray icon)"]
+        menu["NSMenu (tray menu)"]
+        settings["SwiftUI (settings window)"]
+        alert["NSAlert (password prompt)"]
     end
 
-    vpn --> crate
+    swift -- "Unix Socket IPC<br/>(JSON commands)" --> daemon
+
+    subgraph daemon["Rust Daemon (headless)"]
+        ipc["IPC Server"]
+        vpnmgr["VPN Manager"]
+        profiles["Profile Store"]
+        kc["Keychain"]
+        ipc --> vpnmgr
+        ipc --> profiles
+        ipc --> kc
+    end
+
+    subgraph cli["CLI Companion"]
+        cliprog["fortivpn"]
+    end
+
+    cli -- "Unix Socket IPC" --> daemon
+
+    vpnmgr --> crate
 
     subgraph crate["fortivpn crate (pure Rust)"]
         auth["TLS + Auth"]
@@ -57,18 +78,20 @@ graph TD
         ops["Route / DNS Commands"]
     end
 
-    style app fill:#0ea5e9,stroke:#0284c7,color:#fff
+    style swift fill:#F05138,stroke:#c43e2d,color:#fff
+    style daemon fill:#0ea5e9,stroke:#0284c7,color:#fff
     style crate fill:#2563eb,stroke:#1d4ed8,color:#fff
     style helper fill:#7c3aed,stroke:#6d28d9,color:#fff
+    style cli fill:#6b7280,stroke:#4b5563,color:#fff
 ```
 
 ### Key Design Decisions
 
+- **Swift + Rust split** — Swift owns all UI (tray icon, menu, settings window, password prompt). Rust runs as a headless daemon handling VPN protocol, profile storage, keychain access, and IPC. They communicate over a Unix domain socket using JSON commands.
+
 - **Native Rust protocol implementation** — TLS, HTTP auth, PPP framing, and IP bridging are all implemented from scratch. No dependency on `openfortivpn` or any external VPN binary.
 
-- **No framework overhead** — Uses `tao` for the macOS event loop and `tray-icon`/`muda` for the system tray. No Electron, no Tauri, no WebKit process running in the background. Near-zero battery drain when idle.
-
-- **On-demand settings UI** — Settings window uses WKWebView loaded only when opened. WebKit is not running when settings is closed.
+- **Near-zero battery drain** — No polling, no WebKit, no background timers. The Swift app sleeps completely when idle. The Rust daemon blocks on socket `accept()`. State refreshes only when you interact with the tray menu.
 
 - **Privilege separation** — Only the helper process runs with elevated privileges (as a launchd daemon). It creates the TUN device and passes the file descriptor back via `SCM_RIGHTS`. The main app stays unprivileged.
 
@@ -82,39 +105,45 @@ graph TD
 
 ```
 fortivpn-tray/
-├── src/
-│   ├── main.rs              # App entry point (tao event loop, tray icon)
-│   ├── app.rs               # Shared state, tray menu, connect/disconnect handlers
-│   ├── settings_webview.rs  # On-demand WKWebView settings window
-│   ├── native_ui.rs         # Native NSAlert password prompt
-│   ├── notification.rs      # Desktop notifications (notify-rust)
-│   ├── vpn.rs               # VPN connection lifecycle
-│   ├── profile.rs           # Profile CRUD, JSON persistence
-│   ├── keychain.rs          # macOS Keychain read/write/delete
-│   ├── ipc.rs               # Unix socket IPC server for CLI
-│   └── installer.rs         # Helper daemon installation
+├── macos/FortiVPNTray/          # Swift macOS app
+│   ├── Sources/
+│   │   ├── App.swift            # @main entry point
+│   │   ├── AppDelegate.swift    # NSStatusItem, NSMenu, tray icon
+│   │   ├── VPNState.swift       # Observable state (profiles, status)
+│   │   ├── DaemonClient.swift   # Unix socket IPC client
+│   │   ├── SettingsView.swift   # SwiftUI settings window
+│   │   ├── ProfileFormView.swift # SwiftUI profile edit form
+│   │   └── Models.swift         # Codable data models
+│   └── Package.swift
+├── src/                          # Rust daemon
+│   ├── main.rs                  # Daemon entry point (tokio runtime)
+│   ├── ipc.rs                   # Unix socket IPC server + command handlers
+│   ├── vpn.rs                   # VPN connection lifecycle
+│   ├── profile.rs               # Profile CRUD, JSON persistence
+│   ├── keychain.rs              # macOS Keychain read/write/delete
+│   ├── installer.rs             # Helper daemon installation
+│   └── notification.rs          # Desktop notifications
 ├── crates/
-│   ├── fortivpn/            # Core VPN library (protocol, auth, tunneling)
-│   ├── fortivpn-helper/     # Privileged helper binary (TUN + routing)
-│   └── fortivpn-cli/        # CLI companion tool
+│   ├── fortivpn/                # Core VPN library (protocol, auth, tunneling)
+│   ├── fortivpn-helper/         # Privileged helper binary (TUN + routing)
+│   └── fortivpn-cli/            # CLI companion tool
 ├── resources/
-│   ├── settings/index.html  # Settings UI (HTML/CSS/JS)
-│   ├── Info.plist           # macOS app bundle metadata
+│   ├── Info.plist               # macOS app bundle metadata
 │   └── com.fortivpn-tray.helper.plist  # launchd daemon config
 ├── scripts/
-│   └── bundle-app.sh        # Create .app bundle from release build
-├── icons/                    # App and tray icons
-├── Cargo.toml               # Workspace root
-└── build.rs                  # Build script (helper binary)
+│   └── bundle-app.sh            # Build + assemble .app bundle
+├── icons/                        # App and tray icons
+├── Cargo.toml                    # Rust workspace root
+└── build.rs                      # Build script (helper binary)
 ```
 
 ## Features
 
 - One-click connect/disconnect from the system tray
-- Near-zero battery drain when idle (no background WebKit)
-- Multiple VPN profile support
-- Settings UI with macOS dark mode support
+- Near-zero battery drain when idle (no polling, no WebKit)
+- Native SwiftUI settings with dark mode support
 - Native password prompt on first connect
+- Multiple VPN profile support
 - CLI companion for terminal workflows
 - Secure credential storage (macOS Keychain)
 - Native desktop notifications
@@ -124,19 +153,20 @@ fortivpn-tray/
 ## Prerequisites
 
 - [Rust toolchain](https://rustup.rs/)
+- Xcode Command Line Tools (for Swift)
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+xcode-select --install
 ```
 
 ## Build
 
 ```bash
-cargo build --release
 bash scripts/bundle-app.sh
 ```
 
-This produces:
+This builds both the Rust daemon and Swift app, then assembles them into a macOS `.app` bundle:
 - `target/release/bundle/FortiVPN Tray.app` — the macOS app bundle
 - `target/release/fortivpn` — the CLI companion
 
@@ -170,7 +200,7 @@ launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
 
 ### CLI
 
-The CLI controls the VPN through the tray app via a Unix socket.
+The CLI controls the VPN through the daemon via a Unix socket.
 
 ```bash
 fortivpn status              # Show connection status
@@ -191,7 +221,7 @@ Profile matching is case-insensitive and partial — `sg` matches "My SG VPN".
 |------|----------|
 | Profiles | `~/Library/Application Support/fortivpn-tray/profiles.json` |
 | Passwords | macOS Keychain (service: `fortivpn-tray`) |
-| IPC Socket | `~/.config/fortivpn-tray/ipc.sock` |
+| IPC Socket | `~/Library/Application Support/fortivpn-tray/ipc.sock` |
 
 ## How FortiGate SSL-VPN Works
 
@@ -310,7 +340,7 @@ Once PPP negotiation completes, the client runs an **async IP bridge** — two c
 
 ```mermaid
 graph LR
-    subgraph outbound["Outbound (app → corporate)"]
+    subgraph outbound["Outbound (app to corporate)"]
         direction LR
         A1["App Traffic"] --> T1["TUN Device"]
         T1 --> P1["PPP Frame"]
@@ -318,7 +348,7 @@ graph LR
         E1 --> G1["FortiGate"]
     end
 
-    subgraph inbound["Inbound (corporate → app)"]
+    subgraph inbound["Inbound (corporate to app)"]
         direction RL
         G2["FortiGate"] --> D2["TLS Decrypt"]
         D2 --> P2["PPP Frame"]
@@ -330,8 +360,8 @@ graph LR
     style inbound fill:#dcfce7,stroke:#16a34a
 ```
 
-- **TUN → Tunnel**: Read raw IP packets from the TUN device, wrap them in PPP frames with FortiGate's header, encrypt via TLS, and send to the gateway.
-- **Tunnel → TUN**: Read encrypted PPP frames from the TLS connection, unwrap the IP packets, and write them to the TUN device.
+- **TUN to Tunnel**: Read raw IP packets from the TUN device, wrap them in PPP frames with FortiGate's header, encrypt via TLS, and send to the gateway.
+- **Tunnel to TUN**: Read encrypted PPP frames from the TLS connection, unwrap the IP packets, and write them to the TUN device.
 
 The bridge also handles **LCP Echo** keep-alive messages — the gateway sends periodic echo requests, and the client must reply to prove the connection is still alive. If 3 consecutive echoes go unanswered, the gateway drops the session.
 
@@ -343,16 +373,16 @@ With the tunnel running, the client configures the OS routing table so that traf
 graph TD
     subgraph split["Split Tunnel (specific routes)"]
         direction LR
-        S1["10.0.0.0/8"] --> TUN1["TUN → VPN"]
+        S1["10.0.0.0/8"] --> TUN1["TUN to VPN"]
         S2["172.16.0.0/12"] --> TUN1
-        S3["All other traffic"] --> WAN1["Wi-Fi → Internet"]
+        S3["All other traffic"] --> WAN1["Wi-Fi to Internet"]
     end
 
     subgraph full["Full Tunnel (all traffic)"]
         direction LR
-        F1["0.0.0.0/1"] --> TUN2["TUN → VPN"]
+        F1["0.0.0.0/1"] --> TUN2["TUN to VPN"]
         F2["128.0.0.0/1"] --> TUN2
-        F3["Gateway host route"] --> WAN2["Wi-Fi → Internet"]
+        F3["Gateway host route"] --> WAN2["Wi-Fi to Internet"]
     end
 
     style split fill:#dbeafe,stroke:#2563eb
