@@ -12,6 +12,7 @@
   <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-F05138?style=flat&logo=swift&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white">
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/ktutnik/fortivpn-tray"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/ktutnik/fortivpn-tray/badge"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg">
 </p>
 
