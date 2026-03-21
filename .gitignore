@@ -35,3 +35,4 @@ docs/plans/
 *.njsproj
 *.sln
 *.sw?
+binaries/
