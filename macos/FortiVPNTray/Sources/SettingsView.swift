@@ -41,7 +41,9 @@ struct SettingsView: View {
             }
             .frame(minWidth: 160)
             .onChange(of: selectedProfileId) { _ in
-                isCreatingNew = false
+                if selectedProfileId != nil {
+                    isCreatingNew = false
+                }
             }
         } detail: {
             if isCreatingNew {
