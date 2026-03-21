@@ -9,25 +9,13 @@ class VPNState: ObservableObject {
     var isBusy: Bool { status == "connecting" || status == "disconnecting" || status == "connected" }
 
     let client = DaemonClient()
-    private var pollTimer: Timer?
 
+    /// Refresh state from daemon. Called on-demand (menu click, after connect/disconnect).
     func refresh() {
         profiles = client.getProfiles()
         if let s = client.getStatus() {
             status = s.status
             connectedProfile = s.profile
         }
-    }
-
-    func startPolling() {
-        refresh()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.refresh()
-        }
-    }
-
-    func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
     }
 }

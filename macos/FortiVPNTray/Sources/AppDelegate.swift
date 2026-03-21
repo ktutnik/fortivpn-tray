@@ -15,21 +15,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image?.isTemplate = true
         }
 
-        state.startPolling()
+        // No polling — menu refreshes on click via NSMenuDelegate.
+        // Icon updates only after connect/disconnect actions.
 
-        // Create initial menu with delegate — menu rebuilds on every click
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
-
-        // Update tray icon periodically
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if let button = self.statusItem.button {
-                button.image = self.loadTrayIcon(connected: self.state.isConnected)
-                button.image?.isTemplate = true
-            }
-        }
     }
 
     // Rebuild menu fresh every time the user clicks the tray icon
@@ -37,6 +28,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.refresh()
         menu.removeAllItems()
         populateMenu(menu)
+
+        // Update tray icon to match current state
+        if let button = statusItem.button {
+            button.image = loadTrayIcon(connected: state.isConnected)
+            button.image?.isTemplate = true
+        }
     }
 
     func populateMenu(_ menu: NSMenu) {
@@ -91,6 +88,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let resp = self?.state.client.connectVPN(name: profile.name)
             DispatchQueue.main.async {
                 self?.state.refresh()
+                self?.updateIcon()
                 if resp?.ok != true {
                     let alert = NSAlert()
                     alert.messageText = "Connection Failed"
@@ -107,6 +105,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = self?.state.client.disconnectVPN()
             DispatchQueue.main.async {
                 self?.state.refresh()
+                self?.updateIcon()
             }
         }
     }
@@ -140,7 +139,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func quitApp() {
-        state.stopPolling()
         if state.isConnected {
             _ = state.client.disconnectVPN()
         }
@@ -171,8 +169,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 _ = self?.state.client.connectVPN(name: profile.name)
                 DispatchQueue.main.async {
                     self?.state.refresh()
+                    self?.updateIcon()
                 }
             }
+        }
+    }
+
+    func updateIcon() {
+        if let button = statusItem.button {
+            button.image = loadTrayIcon(connected: state.isConnected)
+            button.image?.isTemplate = true
         }
     }
 
