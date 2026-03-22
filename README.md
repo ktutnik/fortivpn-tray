@@ -46,23 +46,48 @@ FortiVPN Tray takes a different approach — a **lightweight system tray app** t
 
 FortiVPN Tray is distributed as source code rather than a pre-built binary. This is intentional:
 
-- **No Apple Developer Account** — Distributing a signed `.dmg` or publishing to the Mac App Store requires a paid Apple Developer Program membership ($99/year). Without code signing, macOS Gatekeeper blocks downloaded binaries with "app is damaged" or "unidentified developer" warnings that are difficult to bypass.
+- **No code signing costs** — Distributing signed binaries requires a paid Apple Developer Program ($99/year) on macOS, and an EV code signing certificate (~$300/year) on Windows. Without signing, macOS Gatekeeper blocks downloads with "unidentified developer" warnings, and Windows SmartScreen shows scary dialogs. Building locally avoids all of this.
 - **Transparency** — A VPN app handles all your network traffic. Building from source lets you inspect exactly what the code does before trusting it with your data.
-- **No notarization workarounds** — Unsigned apps downloaded from the internet require users to manually bypass Gatekeeper via System Settings, which is a poor experience. Building locally avoids this entirely since locally-built apps are trusted by macOS.
+- **Locally-built apps are trusted** — macOS and Windows don't block apps you build yourself, only apps downloaded from the internet.
 
 ### Prerequisites
 
-- [Rust toolchain](https://rustup.rs/)
-- Xcode Command Line Tools (for Swift compiler)
+All platforms need the [Rust toolchain](https://rustup.rs/):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-xcode-select --install
 ```
 
-### Quick Install
+**Platform-specific requirements:**
 
-Clone and run the install script:
+| Platform | Additional Requirements |
+|----------|----------------------|
+| **macOS** | Xcode Command Line Tools: `xcode-select --install` |
+| **Linux** | WebKitGTK + GTK3 + libappindicator (see below) |
+| **Windows** | [Git for Windows](https://git-scm.com/download/win) (includes Git Bash), WebView2 (pre-installed on Win 10/11) |
+
+<details>
+<summary>Linux dependencies (click to expand)</summary>
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+```
+
+**Fedora:**
+```bash
+sudo dnf install webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel
+```
+
+**Arch:**
+```bash
+sudo pacman -S webkit2gtk-4.1 gtk3 libappindicator-gtk3
+```
+</details>
+
+### Install
+
+Clone the repo and run the install script. It auto-detects your platform:
 
 ```bash
 git clone https://github.com/ktutnik/fortivpn-tray.git
@@ -70,43 +95,19 @@ cd fortivpn-tray
 ./install.sh
 ```
 
-This will:
-1. Build the Rust daemon and helper
-2. Build the Swift UI app
-3. Assemble the `.app` bundle
-4. Copy to `/Applications`
-5. Install the privileged helper daemon (prompts for admin password once)
-6. Launch the app
+> **Windows**: Open **Git Bash** (installed with Git for Windows) and run the commands above. Do NOT use Command Prompt or PowerShell — the install script requires Bash.
 
-### Manual Install
+The install script will:
 
-If you prefer to build step by step:
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| **Builds** | Rust daemon + Swift UI | Rust daemon + Rust UI | Rust daemon + Rust UI |
+| **Installs to** | `/Applications/` | `~/.local/bin/` | `%LOCALAPPDATA%\FortiVPN Tray\` |
+| **Tray icon** | Native (Swift NSStatusItem) | tray-icon (libappindicator) | tray-icon (Win32) |
+| **Settings UI** | SwiftUI (native) | WebView (WebKitGTK) | WebView (WebView2/Edge) |
+| **Admin required** | Yes (one-time, for helper daemon) | No | No |
 
-```bash
-# Build everything
-bash scripts/bundle-app.sh
-
-# Copy app to Applications
-cp -r "target/release/bundle/FortiVPN Tray.app" /Applications/
-
-# Install privileged helper daemon (one-time, requires admin password)
-sudo bash -c '
-cp target/release/fortivpn-helper /Library/PrivilegedHelperTools/fortivpn-helper &&
-chmod 755 /Library/PrivilegedHelperTools/fortivpn-helper &&
-chown root:wheel /Library/PrivilegedHelperTools/fortivpn-helper &&
-cp resources/com.fortivpn-tray.helper.plist /Library/LaunchDaemons/ &&
-chown root:wheel /Library/LaunchDaemons/com.fortivpn-tray.helper.plist &&
-launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null;
-launchctl bootstrap system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
-'
-
-# Launch
-open "/Applications/FortiVPN Tray.app"
-```
-
-### Updating
-
-Pull the latest changes and re-run the install script:
+### Update
 
 ```bash
 git pull
@@ -116,19 +117,43 @@ git pull
 ### Uninstall
 
 ```bash
-# Remove app
-rm -rf "/Applications/FortiVPN Tray.app"
-
-# Remove helper daemon
-sudo bash -c '
-launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null
-rm -f /Library/PrivilegedHelperTools/fortivpn-helper
-rm -f /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
-'
-
-# Remove config and profiles (optional)
-rm -rf ~/Library/Application\ Support/fortivpn-tray
+./uninstall.sh
 ```
+
+This will:
+- Stop running processes
+- Remove installed binaries and app bundle
+- Remove helper daemon (macOS, requires admin password)
+- Optionally remove profiles and config (asks for confirmation)
+
+> **Windows**: Run `./uninstall.sh` in **Git Bash**. It will also remind you to remove any startup shortcuts manually.
+
+<details>
+<summary>Manual uninstall (without script)</summary>
+
+**macOS:**
+```bash
+rm -rf "/Applications/FortiVPN Tray.app"
+sudo launchctl bootout system /Library/LaunchDaemons/com.fortivpn-tray.helper.plist 2>/dev/null
+sudo rm -f /Library/PrivilegedHelperTools/fortivpn-helper
+sudo rm -f /Library/LaunchDaemons/com.fortivpn-tray.helper.plist
+rm -rf ~/Library/Application\ Support/fortivpn-tray  # optional: removes profiles
+```
+
+**Linux:**
+```bash
+rm -f ~/.local/bin/fortivpn-{daemon,ui,helper} ~/.local/bin/fortivpn
+rm -f ~/.local/share/applications/fortivpn-tray.desktop
+rm -f ~/.config/autostart/fortivpn-tray.desktop
+rm -rf ~/.config/fortivpn-tray  # optional: removes profiles
+```
+
+**Windows (Git Bash):**
+```bash
+rm -rf "$LOCALAPPDATA/FortiVPN Tray"
+rm -rf "$APPDATA/fortivpn-tray"  # optional: removes profiles
+```
+</details>
 
 ## Usage
 
