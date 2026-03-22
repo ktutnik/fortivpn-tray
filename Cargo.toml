@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cli"]
+members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cli", "crates/fortivpn-ui"]
 
 [package]
 name = "fortivpn-daemon"
