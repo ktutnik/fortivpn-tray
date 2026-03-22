@@ -5,7 +5,7 @@
 <h1 align="center">FortiVPN Tray</h1>
 
 <p align="center">
-  A lightweight macOS system tray app for FortiGate SSL-VPN — built with Swift and Rust.
+  A lightweight system tray app for FortiGate SSL-VPN with password storage and CLI automation — built with Swift and Rust.
 </p>
 
 <p align="center">
@@ -20,22 +20,28 @@
 
 ## Motivation
 
-Connecting to a FortiGate SSL-VPN usually means either running the heavy FortiClient app or wrestling with `openfortivpn` in the terminal with `sudo`. Both have friction:
+Connecting to a FortiGate SSL-VPN has three common options — all with significant friction:
 
-- **FortiClient** is bloated, installs kernel extensions, and runs background services you don't need.
-- **openfortivpn** requires `sudo` for every connection, a config file, and terminal babysitting.
+- **FortiClient** doesn't store your VPN password. Every single connection requires manually typing your credentials. It's also bloated, installs kernel extensions, and runs background services you don't need.
+- **openfortivpn** requires `sudo` for every connection, a config file, and terminal babysitting. No GUI, no password storage.
+- **AI coding assistants** (Claude Code, Cursor, GitHub Copilot) that need VPN access to reach internal resources have no way to connect, disconnect, or check VPN status through FortiClient — there's no CLI, no API, no automation interface. You have to manually switch back to FortiClient every time the VPN drops.
 
-FortiVPN Tray takes a different approach — a **lightweight system tray app** that implements the FortiGate SSL-VPN protocol natively in Rust. No subprocess wrapping, no kernel extensions, no bloat. Just click to connect.
+FortiVPN Tray solves all three problems:
+
+- **Stores your password securely** in the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) — enter it once, connect forever
+- **CLI companion** (`fortivpn connect sg`) lets AI coding assistants and scripts manage VPN connections programmatically
+- **Lightweight system tray app** with near-zero battery impact — no kernel extensions, no bloat, just click to connect
 
 ## Features
 
+- **Password storage** — enter your VPN password once, stored securely in OS keychain
+- **CLI for automation** — `fortivpn connect/disconnect/status` for scripts and AI assistants
 - One-click connect/disconnect from the system tray
 - Near-zero battery drain when idle (no polling, no WebKit)
-- Native SwiftUI settings with dark mode support
+- Native settings UI with dark mode support
 - Native password prompt on first connect
 - Multiple VPN profile support
-- CLI companion for terminal workflows
-- Secure credential storage (macOS Keychain)
+- Secure credential storage (macOS Keychain / Windows Credential Manager / Linux Secret Service)
 - Native desktop notifications
 - IPv6 leak prevention
 - No external VPN binaries required
@@ -44,11 +50,11 @@ FortiVPN Tray takes a different approach — a **lightweight system tray app** t
 
 ### Why Build from Source?
 
-FortiVPN Tray is distributed as source code rather than a pre-built binary. This is intentional:
+A VPN app routes **all your network traffic** through its tunnel. You should know exactly what it does with that access. FortiVPN Tray is distributed as source code so you can audit it before trusting it.
 
-- **No code signing costs** — Distributing signed binaries requires a paid Apple Developer Program ($99/year) on macOS, and an EV code signing certificate (~$300/year) on Windows. Without signing, macOS Gatekeeper blocks downloads with "unidentified developer" warnings, and Windows SmartScreen shows scary dialogs. Building locally avoids all of this.
-- **Transparency** — A VPN app handles all your network traffic. Building from source lets you inspect exactly what the code does before trusting it with your data.
-- **Locally-built apps are trusted** — macOS and Windows don't block apps you build yourself, only apps downloaded from the internet.
+- **Trust through transparency** — Every line of code is open for inspection. Unlike closed-source VPN clients, you can verify there's no telemetry, no data collection, no hidden network calls. Build it yourself and know exactly what's running.
+- **No code signing costs** — Distributing signed binaries requires a paid Apple Developer Program ($99/year) on macOS, and an EV code signing certificate (~$300/year) on Windows. Without signing, OS gatekeepers block downloaded binaries. Building locally avoids this entirely — locally-built apps are trusted by default.
+- **Reproducible** — Same source code, same build, same binary. Anyone can verify the build produces identical results.
 
 ### Prerequisites
 
@@ -167,7 +173,7 @@ rm -rf "$APPDATA/fortivpn-tray"  # optional: removes profiles
 
 ### CLI
 
-The CLI controls the VPN through the daemon via a Unix socket.
+The CLI controls the VPN through the daemon via a Unix socket. This is what makes FortiVPN Tray automatable — AI coding assistants, scripts, and cron jobs can manage VPN connections programmatically.
 
 ```bash
 fortivpn status              # Show connection status
@@ -181,6 +187,23 @@ Short aliases: `s` = status, `l` = list, `c` = connect, `d` = disconnect
 Profile matching is case-insensitive and partial — `sg` matches "My SG VPN".
 
 > The tray app must be running for the CLI to work.
+
+### AI Coding Assistant Integration
+
+AI coding assistants like Claude Code, Cursor, or GitHub Copilot can use the CLI to manage VPN connections when they need access to internal resources:
+
+```bash
+# Check if VPN is connected before accessing internal services
+fortivpn status
+
+# Connect to VPN when needed
+fortivpn connect sg
+
+# Disconnect when done
+fortivpn disconnect
+```
+
+Since passwords are stored in the OS keychain, the CLI connects without any interactive prompts — perfect for automated workflows.
 
 ## Data Storage
 
