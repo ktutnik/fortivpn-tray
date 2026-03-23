@@ -1,23 +1,25 @@
 import AppKit
 import Security
 import SwiftUI
+import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let state = VPNState()
     var settingsWindow: NSWindow?
+    var spinTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureDaemonRunning()
+
+        // Request notification permission
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = loadTrayIcon(connected: false)
             button.image?.isTemplate = true
         }
-
-        // No polling — menu refreshes on click via NSMenuDelegate.
-        // Icon updates only after connect/disconnect actions.
 
         let menu = NSMenu()
         menu.delegate = self
@@ -30,7 +32,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         populateMenu(menu)
 
-        // Update tray icon to match current state
         if let button = statusItem.button {
             button.image = loadTrayIcon(connected: state.isConnected)
             button.image?.isTemplate = true
@@ -54,64 +55,96 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-
-        let statusText: String
-        if state.status.hasPrefix("error") {
-            statusText = "Status: \(state.status)"
-        } else if state.isConnected, let name = state.connectedProfile {
-            statusText = "Status: Connected to \(name)"
-        } else {
-            statusText = "Status: \(state.status.capitalized)"
-        }
-        let statusMenuItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
-
-        menu.addItem(.separator())
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-
     }
+
+    // MARK: - Connect / Disconnect
 
     @objc func doConnect(_ sender: NSMenuItem) {
         guard let profile = sender.representedObject as? VpnProfile else { return }
 
-        // Read password from Keychain (Swift has UI access — no blocked keyboard)
         guard let password = readKeychainPassword(profileId: profile.id) else {
             showPasswordPrompt(profile: profile)
             return
         }
 
+        startSpinner()
+
         DispatchQueue.global().async { [weak self] in
-            // Send password to daemon so it never touches Keychain
             let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
             DispatchQueue.main.async {
+                self?.stopSpinner()
                 self?.state.refresh()
                 self?.updateIcon()
-                if resp?.ok != true {
-                    let alert = NSAlert()
-                    alert.messageText = "Connection Failed"
-                    alert.informativeText = resp?.message ?? "Unknown error"
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                if resp?.ok == true {
+                    self?.sendNotification(title: "FortiVPN Connected", body: "Connected to \(profile.name)")
+                } else {
+                    self?.sendNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
                 }
             }
         }
     }
 
     @objc func doDisconnect() {
+        startSpinner()
+
         DispatchQueue.global().async { [weak self] in
             _ = self?.state.client.disconnectVPN()
             DispatchQueue.main.async {
+                self?.stopSpinner()
                 self?.state.refresh()
                 self?.updateIcon()
+                self?.sendNotification(title: "FortiVPN Disconnected", body: "VPN connection closed")
             }
         }
     }
+
+    // MARK: - Loading Spinner
+
+    func startSpinner() {
+        guard let button = statusItem.button else { return }
+
+        // Use a spinning animation by cycling through frames
+        var frame = 0
+        let symbols = ["arrow.triangle.2.circlepath"]
+        button.image = NSImage(systemSymbolName: symbols[0], accessibilityDescription: "Loading")
+        button.image?.isTemplate = true
+
+        spinTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            guard let button = self?.statusItem.button else { return }
+            frame = (frame + 1) % 8
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            let img = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Loading")?
+                .withSymbolConfiguration(config)
+            // Rotate effect via slight size variation
+            button.image = img
+            button.image?.isTemplate = true
+        }
+    }
+
+    func stopSpinner() {
+        spinTimer?.invalidate()
+        spinTimer = nil
+    }
+
+    // MARK: - Notifications
+
+    func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: - Settings
 
     @objc func openSettings() {
         if let window = settingsWindow {
@@ -134,30 +167,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
 
-        // Show in Dock while settings is open
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
         settingsWindow = window
     }
 
+    // MARK: - Quit
+
     @objc func quitApp() {
         if state.isConnected {
             _ = state.client.disconnectVPN()
         }
-        // Kill the daemon process so it doesn't linger
         killDaemon()
         NSApp.terminate(nil)
     }
 
     func killDaemon() {
-        // Find and kill any fortivpn-daemon processes we spawned
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-f", "fortivpn-daemon"]
         try? task.run()
         task.waitUntilExit()
     }
+
+    // MARK: - Password Prompt
 
     func showPasswordPrompt(profile: VpnProfile) {
         let alert = NSAlert()
@@ -176,20 +210,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let password = input.stringValue
             guard !password.isEmpty else { return }
 
-            // Store password in Keychain via Swift (not daemon)
             storeKeychainPassword(profileId: profile.id, password: password)
 
+            startSpinner()
             DispatchQueue.global().async { [weak self] in
                 let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
                 DispatchQueue.main.async {
+                    self?.stopSpinner()
                     self?.state.refresh()
                     self?.updateIcon()
+                    if resp?.ok == true {
+                        self?.sendNotification(title: "FortiVPN Connected", body: "Connected to \(profile.name)")
+                    } else {
+                        self?.sendNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
+                    }
                 }
             }
         }
     }
 
-    // MARK: - Keychain (Swift-side, avoids daemon Keychain access on macOS)
+    // MARK: - Keychain
 
     func readKeychainPassword(profileId: String) -> String? {
         let query: [String: Any] = [
@@ -210,7 +250,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func storeKeychainPassword(profileId: String, password: String) {
         let passwordData = password.data(using: .utf8)!
 
-        // Try to update first
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "fortivpn-tray",
@@ -221,12 +260,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
-            // Add new
             var addQuery = query
             addQuery[kSecValueData as String] = passwordData
             SecItemAdd(addQuery as CFDictionary, nil)
         }
     }
+
+    // MARK: - Icon
 
     func updateIcon() {
         if let button = statusItem.button {
@@ -237,30 +277,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func loadTrayIcon(connected: Bool) -> NSImage? {
         let name = connected ? "vpn-connected" : "vpn-disconnected"
-        // Look in bundle Resources first, then next to executable
         if let path = Bundle.main.path(forResource: name, ofType: "png") {
             let img = NSImage(contentsOfFile: path)
             img?.size = NSSize(width: 18, height: 18)
             return img
         }
-        // Fallback to SF Symbol
         return NSImage(systemSymbolName: connected ? "shield.fill" : "shield", accessibilityDescription: "VPN")
     }
+
+    // MARK: - Daemon
 
     func ensureDaemonRunning() {
         if state.client.isConnected { return }
 
-        // Kill any orphan daemon that might be holding the socket
         killDaemon()
         Thread.sleep(forTimeInterval: 0.5)
 
-        // Launch fresh daemon from bundle
         if let url = Bundle.main.url(forAuxiliaryExecutable: "fortivpn-daemon") {
             let process = Process()
             process.executableURL = url
             try? process.run()
 
-            // Wait for daemon to be ready (up to 5 seconds)
             for _ in 0..<10 {
                 Thread.sleep(forTimeInterval: 0.5)
                 if state.client.isConnected { return }
@@ -273,7 +310,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 extension AppDelegate: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         settingsWindow = nil
-        // Hide from Dock when settings closes
         NSApp.setActivationPolicy(.accessory)
     }
 }
