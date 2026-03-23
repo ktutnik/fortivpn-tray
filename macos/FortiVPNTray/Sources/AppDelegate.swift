@@ -1,23 +1,19 @@
 import AppKit
 import Security
 import SwiftUI
-import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let state = VPNState()
     var settingsWindow: NSWindow?
-    var spinTimer: Timer?
+    var isLoading = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureDaemonRunning()
 
-        // Request notification permission
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = loadTrayIcon(connected: false)
+            button.image = loadTrayIcon(name: "vpn-disconnected")
             button.image?.isTemplate = true
         }
 
@@ -28,33 +24,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Rebuild menu fresh every time the user clicks the tray icon
     func menuNeedsUpdate(_ menu: NSMenu) {
-        state.refresh()
+        if !isLoading {
+            state.refresh()
+        }
         menu.removeAllItems()
         populateMenu(menu)
 
-        if let button = statusItem.button {
-            button.image = loadTrayIcon(connected: state.isConnected)
-            button.image?.isTemplate = true
+        if !isLoading {
+            updateIcon()
         }
     }
 
     func populateMenu(_ menu: NSMenu) {
-        for profile in state.profiles {
-            let connected = state.isConnected && state.connectedProfile == profile.name
-            if connected {
-                let item = NSMenuItem(title: "\u{25CF} \(profile.name) \u{2014} Disconnect", action: #selector(doDisconnect), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            } else {
-                let item = NSMenuItem(title: "\u{25CB} \(profile.name) \u{2014} Connect", action: #selector(doConnect(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = profile
-                item.isEnabled = !state.isBusy
-                menu.addItem(item)
+        if isLoading {
+            let item = NSMenuItem(title: "Connecting...", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(.separator())
+        } else {
+            for profile in state.profiles {
+                let connected = state.isConnected && state.connectedProfile == profile.name
+                if connected {
+                    let item = NSMenuItem(title: "\u{25CF} \(profile.name) \u{2014} Disconnect", action: #selector(doDisconnect), keyEquivalent: "")
+                    item.target = self
+                    menu.addItem(item)
+                } else {
+                    let item = NSMenuItem(title: "\u{25CB} \(profile.name) \u{2014} Connect", action: #selector(doConnect(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = profile
+                    item.isEnabled = !state.isBusy
+                    menu.addItem(item)
+                }
             }
+            menu.addItem(.separator())
         }
 
-        menu.addItem(.separator())
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -73,75 +77,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        startSpinner()
+        connectWithLoading(profileName: profile.name, password: password)
+    }
+
+    func connectWithLoading(profileName: String, password: String) {
+        setLoading(true)
 
         DispatchQueue.global().async { [weak self] in
-            let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
+            let resp = self?.state.client.connectWithPassword(name: profileName, password: password)
             DispatchQueue.main.async {
-                self?.stopSpinner()
+                self?.setLoading(false)
                 self?.state.refresh()
                 self?.updateIcon()
                 if resp?.ok == true {
-                    self?.sendNotification(title: "FortiVPN Connected", body: "Connected to \(profile.name)")
+                    self?.showNotification(title: "FortiVPN Connected", body: "Connected to \(profileName)")
                 } else {
-                    self?.sendNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
+                    self?.showNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
                 }
             }
         }
     }
 
     @objc func doDisconnect() {
-        startSpinner()
+        setLoading(true)
 
         DispatchQueue.global().async { [weak self] in
             _ = self?.state.client.disconnectVPN()
             DispatchQueue.main.async {
-                self?.stopSpinner()
+                self?.setLoading(false)
                 self?.state.refresh()
                 self?.updateIcon()
-                self?.sendNotification(title: "FortiVPN Disconnected", body: "VPN connection closed")
+                self?.showNotification(title: "FortiVPN Disconnected", body: "VPN connection closed")
             }
         }
     }
 
-    // MARK: - Loading Spinner
+    // MARK: - Loading State
 
-    func startSpinner() {
+    func setLoading(_ loading: Bool) {
+        isLoading = loading
         guard let button = statusItem.button else { return }
-
-        // Use a spinning animation by cycling through frames
-        var frame = 0
-        let symbols = ["arrow.triangle.2.circlepath"]
-        button.image = NSImage(systemSymbolName: symbols[0], accessibilityDescription: "Loading")
-        button.image?.isTemplate = true
-
-        spinTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            guard let button = self?.statusItem.button else { return }
-            frame = (frame + 1) % 8
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-            let img = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Loading")?
-                .withSymbolConfiguration(config)
-            // Rotate effect via slight size variation
-            button.image = img
+        if loading {
+            // Shield with hole = loading indicator
+            button.image = loadTrayIcon(name: "vpn-disconnected")
             button.image?.isTemplate = true
+            // Add a subtle pulsing effect via appearsDisabled
+            button.appearsDisabled = true
+        } else {
+            button.appearsDisabled = false
         }
     }
 
-    func stopSpinner() {
-        spinTimer?.invalidate()
-        spinTimer = nil
-    }
+    // MARK: - Notifications (using Process to call osascript — works for accessory apps)
 
-    // MARK: - Notifications
-
-    func sendNotification(title: String, body: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+    func showNotification(title: String, body: String) {
+        let script = """
+        display notification "\(body.replacingOccurrences(of: "\"", with: "\\\""))" with title "\(title.replacingOccurrences(of: "\"", with: "\\\""))"
+        """
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        try? task.run()
     }
 
     // MARK: - Settings
@@ -211,21 +207,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard !password.isEmpty else { return }
 
             storeKeychainPassword(profileId: profile.id, password: password)
-
-            startSpinner()
-            DispatchQueue.global().async { [weak self] in
-                let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
-                DispatchQueue.main.async {
-                    self?.stopSpinner()
-                    self?.state.refresh()
-                    self?.updateIcon()
-                    if resp?.ok == true {
-                        self?.sendNotification(title: "FortiVPN Connected", body: "Connected to \(profile.name)")
-                    } else {
-                        self?.sendNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
-                    }
-                }
-            }
+            connectWithLoading(profileName: profile.name, password: password)
         }
     }
 
@@ -269,20 +251,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Icon
 
     func updateIcon() {
-        if let button = statusItem.button {
-            button.image = loadTrayIcon(connected: state.isConnected)
-            button.image?.isTemplate = true
-        }
+        guard let button = statusItem.button else { return }
+        button.image = loadTrayIcon(name: state.isConnected ? "vpn-connected" : "vpn-disconnected")
+        button.image?.isTemplate = true
     }
 
-    func loadTrayIcon(connected: Bool) -> NSImage? {
-        let name = connected ? "vpn-connected" : "vpn-disconnected"
+    func loadTrayIcon(name: String) -> NSImage? {
         if let path = Bundle.main.path(forResource: name, ofType: "png") {
             let img = NSImage(contentsOfFile: path)
             img?.size = NSSize(width: 18, height: 18)
             return img
         }
-        return NSImage(systemSymbolName: connected ? "shield.fill" : "shield", accessibilityDescription: "VPN")
+        let symbolName = name.contains("connected") && !name.contains("dis") ? "shield.fill" : "shield"
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: "VPN")
     }
 
     // MARK: - Daemon
