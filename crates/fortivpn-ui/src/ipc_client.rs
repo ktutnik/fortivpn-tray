@@ -22,6 +22,7 @@ pub struct VpnProfile {
     pub port: u16,
     pub username: String,
     pub trusted_cert: String,
+    #[serde(default)]
     pub has_password: bool,
 }
 

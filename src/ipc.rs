@@ -367,7 +367,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                 .profiles
                 .iter()
                 .map(|p| {
-                    let has_pw = crate::keychain::get_password(&p.id).is_ok();
                     serde_json::json!({
                         "id": p.id,
                         "name": p.name,
@@ -375,7 +374,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                         "port": p.port,
                         "username": p.username,
                         "trusted_cert": p.trusted_cert,
-                        "has_password": has_pw,
                     })
                 })
                 .collect();
@@ -483,6 +481,8 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                     data: None,
                 };
             };
+            // On macOS, Swift app checks Keychain directly to avoid daemon auth prompts.
+            // This fallback is for CLI and Linux/Windows where daemon Keychain access works fine.
             let has = crate::keychain::get_password(id).is_ok();
             IpcResponse {
                 ok: true,

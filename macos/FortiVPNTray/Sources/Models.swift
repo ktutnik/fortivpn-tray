@@ -7,12 +7,11 @@ struct VpnProfile: Codable, Identifiable, Hashable {
     var port: Int
     var username: String
     var trustedCert: String
-    var hasPassword: Bool
+    var hasPassword: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, name, host, port, username
         case trustedCert = "trusted_cert"
-        case hasPassword = "has_password"
     }
 }
 
