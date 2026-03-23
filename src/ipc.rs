@@ -255,6 +255,102 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             }
         }
 
+        "connect_with_password" => {
+            let Some(args_str) = arg else {
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: connect_with_password <name> <password>".into(),
+                    data: None,
+                };
+            };
+            let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                return IpcResponse {
+                    ok: false,
+                    message: "Usage: connect_with_password <name> <password>".into(),
+                    data: None,
+                };
+            }
+            let name = parts[0];
+            let password = parts[1];
+
+            let profile_id = {
+                let store_lock = state.store.lock().unwrap();
+                find_profile(&store_lock, name)
+            };
+            let Some(profile_id) = profile_id else {
+                return IpcResponse {
+                    ok: false,
+                    message: format!("Profile not found: {name}"),
+                    data: None,
+                };
+            };
+            let profile = {
+                let store = state.store.lock().unwrap();
+                store.get(&profile_id).cloned()
+            };
+            let Some(profile) = profile else {
+                return IpcResponse {
+                    ok: false,
+                    message: "Profile not found".into(),
+                    data: None,
+                };
+            };
+
+            let result = {
+                let mut vpn = state.vpn.lock().await;
+                vpn.connect_with_password(&profile, password).await
+            };
+
+            match result {
+                Ok(()) => {
+                    let st = state.clone();
+                    {
+                        let mut vpn = state.vpn.lock().await;
+                        if let Some(ref mut session) = vpn.session {
+                            if let Some(event_rx) = session.take_event_rx() {
+                                let handle = tokio::spawn(async move {
+                                    let mut rx = event_rx;
+                                    loop {
+                                        if rx.changed().await.is_err() {
+                                            break;
+                                        }
+                                        let event = rx.borrow().clone();
+                                        if let fortivpn::VpnEvent::Died(ref reason) = event {
+                                            let reason = reason.clone();
+                                            {
+                                                let mut vpn = st.vpn.lock().await;
+                                                vpn.handle_session_death(reason.clone()).await;
+                                            }
+                                            crate::notification::send_notification(
+                                                "FortiVPN Disconnected",
+                                                &reason,
+                                            );
+                                            break;
+                                        }
+                                    }
+                                });
+                                vpn.monitor_handle = Some(handle);
+                            }
+                        }
+                    }
+                    IpcResponse {
+                        ok: true,
+                        message: "Connected".into(),
+                        data: None,
+                    }
+                }
+                Err(e) => {
+                    crate::notification::send_notification("FortiVPN Connection Failed", &e);
+                    IpcResponse {
+                        ok: false,
+                        message: format!("Failed: {e}"),
+                        data: None,
+                    }
+                }
+            }
+        }
+
         "disconnect" => {
             let mut vpn = state.vpn.lock().await;
             let _ = vpn.disconnect().await;

@@ -63,13 +63,20 @@ impl VpnManager {
     }
 
     pub async fn connect(&mut self, profile: &VpnProfile) -> Result<(), String> {
+        let password = self.get_password(&profile.id)?;
+        self.connect_with_password(profile, &password).await
+    }
+
+    pub async fn connect_with_password(
+        &mut self,
+        profile: &VpnProfile,
+        password: &str,
+    ) -> Result<(), String> {
         if self.status == VpnStatus::Connected {
             return Err("Already connected".to_string());
         }
 
         self.status = VpnStatus::Connecting;
-
-        let password = self.get_password(&profile.id)?;
 
         // Ensure helper is running (spawns on first connect, reuses after)
         self.ensure_helper()?;

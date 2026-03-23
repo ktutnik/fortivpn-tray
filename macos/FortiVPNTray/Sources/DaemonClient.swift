@@ -100,6 +100,10 @@ class DaemonClient {
         return false
     }
 
+    func connectWithPassword(name: String, password: String) -> IpcResponse? {
+        send(command: "connect_with_password \(name) \(password)")
+    }
+
     var isConnected: Bool {
         getStatus() != nil
     }

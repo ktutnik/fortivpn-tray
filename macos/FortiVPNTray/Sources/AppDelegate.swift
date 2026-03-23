@@ -1,4 +1,5 @@
 import AppKit
+import Security
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -79,13 +80,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func doConnect(_ sender: NSMenuItem) {
         guard let profile = sender.representedObject as? VpnProfile else { return }
 
-        if !profile.hasPassword {
+        // Read password from Keychain (Swift has UI access — no blocked keyboard)
+        guard let password = readKeychainPassword(profileId: profile.id) else {
             showPasswordPrompt(profile: profile)
             return
         }
 
         DispatchQueue.global().async { [weak self] in
-            let resp = self?.state.client.connectVPN(name: profile.name)
+            // Send password to daemon so it never touches Keychain
+            let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
             DispatchQueue.main.async {
                 self?.state.refresh()
                 self?.updateIcon()
@@ -173,16 +176,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let password = input.stringValue
             guard !password.isEmpty else { return }
 
-            _ = state.client.setPassword(id: profile.id, password: password)
-            state.refresh()
+            // Store password in Keychain via Swift (not daemon)
+            storeKeychainPassword(profileId: profile.id, password: password)
 
             DispatchQueue.global().async { [weak self] in
-                _ = self?.state.client.connectVPN(name: profile.name)
+                let resp = self?.state.client.connectWithPassword(name: profile.name, password: password)
                 DispatchQueue.main.async {
                     self?.state.refresh()
                     self?.updateIcon()
                 }
             }
+        }
+    }
+
+    // MARK: - Keychain (Swift-side, avoids daemon Keychain access on macOS)
+
+    func readKeychainPassword(profileId: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "fortivpn-tray",
+            kSecAttrAccount as String: profileId,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data,
+              let password = String(data: data, encoding: .utf8)
+        else { return nil }
+        return password
+    }
+
+    func storeKeychainPassword(profileId: String, password: String) {
+        let passwordData = password.data(using: .utf8)!
+
+        // Try to update first
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "fortivpn-tray",
+            kSecAttrAccount as String: profileId,
+        ]
+        let update: [String: Any] = [
+            kSecValueData as String: passwordData,
+        ]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            // Add new
+            var addQuery = query
+            addQuery[kSecValueData as String] = passwordData
+            SecItemAdd(addQuery as CFDictionary, nil)
         }
     }
 
