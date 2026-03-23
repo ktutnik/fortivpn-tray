@@ -142,7 +142,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if state.isConnected {
             _ = state.client.disconnectVPN()
         }
+        // Kill the daemon process so it doesn't linger
+        killDaemon()
         NSApp.terminate(nil)
+    }
+
+    func killDaemon() {
+        // Find and kill any fortivpn-daemon processes we spawned
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-f", "fortivpn-daemon"]
+        try? task.run()
+        task.waitUntilExit()
     }
 
     func showPasswordPrompt(profile: VpnProfile) {
@@ -196,12 +207,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func ensureDaemonRunning() {
         if state.client.isConnected { return }
-        // Try to launch daemon from bundle
+
+        // Kill any orphan daemon that might be holding the socket
+        killDaemon()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Launch fresh daemon from bundle
         if let url = Bundle.main.url(forAuxiliaryExecutable: "fortivpn-daemon") {
             let process = Process()
             process.executableURL = url
             try? process.run()
-            Thread.sleep(forTimeInterval: 1.0)
+
+            // Wait for daemon to be ready (up to 5 seconds)
+            for _ in 0..<10 {
+                Thread.sleep(forTimeInterval: 0.5)
+                if state.client.isConnected { return }
+            }
+            print("Warning: daemon did not become ready")
         }
     }
 }
