@@ -33,6 +33,10 @@ class DaemonClient {
         }
         guard connected == 0 else { return nil }
 
+        // Set read timeout (30 seconds — VPN handshake can take a while)
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
         // Send
         let msg = command + "\n"
         msg.withCString { ptr in
