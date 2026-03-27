@@ -259,20 +259,31 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             let Some(args_str) = arg else {
                 return IpcResponse {
                     ok: false,
-                    message: "Usage: connect_with_password <name> <password>".into(),
+                    message: "Usage: connect_with_password <json>".into(),
                     data: None,
                 };
             };
-            let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
-            if parts.len() != 2 {
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(args_str) else {
                 return IpcResponse {
                     ok: false,
-                    message: "Usage: connect_with_password <name> <password>".into(),
+                    message: "Invalid JSON. Usage: connect_with_password {\"name\":\"...\",\"password\":\"...\"}".into(),
                     data: None,
                 };
-            }
-            let name = parts[0];
-            let password = parts[1];
+            };
+            let Some(name) = data["name"].as_str() else {
+                return IpcResponse {
+                    ok: false,
+                    message: "Missing 'name' field".into(),
+                    data: None,
+                };
+            };
+            let Some(password) = data["password"].as_str() else {
+                return IpcResponse {
+                    ok: false,
+                    message: "Missing 'password' field".into(),
+                    data: None,
+                };
+            };
 
             let profile_id = {
                 let store_lock = state.store.lock().unwrap();

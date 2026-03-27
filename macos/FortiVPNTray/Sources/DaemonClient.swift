@@ -105,7 +105,11 @@ class DaemonClient {
     }
 
     func connectWithPassword(name: String, password: String) -> IpcResponse? {
-        send(command: "connect_with_password \(name) \(password)")
+        let json: [String: Any] = ["name": name, "password": password]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: json),
+              let jsonStr = String(data: jsonData, encoding: .utf8)
+        else { return nil }
+        return send(command: "connect_with_password \(jsonStr)")
     }
 
     var isConnected: Bool {
