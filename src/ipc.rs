@@ -215,27 +215,28 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             if let Some(event_rx) = session.take_event_rx() {
                                 let handle = tokio::spawn(async move {
                                     let mut rx = event_rx;
-                                    loop {
-                                        if rx.changed().await.is_err() {
-                                            break;
-                                        }
-                                        let event = rx.borrow().clone();
-                                        if let fortivpn::VpnEvent::Died(ref reason) = event {
-                                            let reason = reason.clone();
-                                            {
-                                                let mut vpn = st.vpn.lock().await;
-                                                vpn.handle_session_death(reason.clone()).await;
+                                    let reason = loop {
+                                        match rx.changed().await {
+                                            Ok(()) => {
+                                                let event = rx.borrow().clone();
+                                                if let fortivpn::VpnEvent::Died(ref r) = event {
+                                                    break r.clone();
+                                                }
                                             }
-                                            crate::notification::send_notification(
-                                                "FortiVPN Disconnected",
-                                                &reason,
-                                            );
-                                            crate::notification::post_distributed_notification(
-                                                "com.fortivpn-tray.status-changed",
-                                            );
-                                            break;
+                                            Err(_) => break "Connection lost".to_string(),
                                         }
+                                    };
+                                    {
+                                        let mut vpn = st.vpn.lock().await;
+                                        vpn.handle_session_death(reason.clone()).await;
                                     }
+                                    crate::notification::send_notification(
+                                        "FortiVPN Disconnected",
+                                        &reason,
+                                    );
+                                    crate::notification::post_distributed_notification(
+                                        "com.fortivpn-tray.status-changed",
+                                    );
                                 });
                                 vpn.monitor_handle = Some(handle);
                             }
@@ -325,27 +326,28 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             if let Some(event_rx) = session.take_event_rx() {
                                 let handle = tokio::spawn(async move {
                                     let mut rx = event_rx;
-                                    loop {
-                                        if rx.changed().await.is_err() {
-                                            break;
-                                        }
-                                        let event = rx.borrow().clone();
-                                        if let fortivpn::VpnEvent::Died(ref reason) = event {
-                                            let reason = reason.clone();
-                                            {
-                                                let mut vpn = st.vpn.lock().await;
-                                                vpn.handle_session_death(reason.clone()).await;
+                                    let reason = loop {
+                                        match rx.changed().await {
+                                            Ok(()) => {
+                                                let event = rx.borrow().clone();
+                                                if let fortivpn::VpnEvent::Died(ref r) = event {
+                                                    break r.clone();
+                                                }
                                             }
-                                            crate::notification::send_notification(
-                                                "FortiVPN Disconnected",
-                                                &reason,
-                                            );
-                                            crate::notification::post_distributed_notification(
-                                                "com.fortivpn-tray.status-changed",
-                                            );
-                                            break;
+                                            Err(_) => break "Connection lost".to_string(),
                                         }
+                                    };
+                                    {
+                                        let mut vpn = st.vpn.lock().await;
+                                        vpn.handle_session_death(reason.clone()).await;
                                     }
+                                    crate::notification::send_notification(
+                                        "FortiVPN Disconnected",
+                                        &reason,
+                                    );
+                                    crate::notification::post_distributed_notification(
+                                        "com.fortivpn-tray.status-changed",
+                                    );
                                 });
                                 vpn.monitor_handle = Some(handle);
                             }
