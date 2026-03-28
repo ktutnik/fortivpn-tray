@@ -8,7 +8,7 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "ne
 rustls = "0.23"
 webpki-roots = "1"
 tokio-rustls = "0.26"
-quick-xml = "0.37"
+quick-xml = "0.39"
 tun2 = { version = "4", features = ["async"] }
 rand = "0.9"
 aws-lc-rs = "1"
