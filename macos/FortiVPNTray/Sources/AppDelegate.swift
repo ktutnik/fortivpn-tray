@@ -75,15 +75,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
+    var lastConnectedProfile: String?
+    var reconnectAttempts = 0
+    let maxReconnectAttempts = 3
+
     @objc func onDaemonStatusChanged() {
         let wasConnected = state.isConnected
         state.refresh()
         updateIcon()
 
-        // Notify user if VPN dropped
+        // VPN dropped — try auto-reconnect
         if wasConnected && !state.isConnected {
             let reason = state.status.hasPrefix("error") ? String(state.status.dropFirst(7)) : "Connection lost"
-            showNotification(title: "FortiVPN Disconnected", body: reason)
+
+            if reconnectAttempts < maxReconnectAttempts, let profileName = lastConnectedProfile {
+                reconnectAttempts += 1
+                showNotification(title: "FortiVPN Reconnecting", body: "Attempt \(reconnectAttempts)/\(maxReconnectAttempts) — \(reason)")
+                attemptReconnect(profileName: profileName)
+            } else {
+                reconnectAttempts = 0
+                lastConnectedProfile = nil
+                showNotification(title: "FortiVPN Disconnected", body: reason)
+            }
+        }
+    }
+
+    func attemptReconnect(profileName: String) {
+        // Find the profile to get its ID for Keychain lookup
+        guard let profile = state.profiles.first(where: { $0.name == profileName }),
+              let password = readKeychainPassword(profileId: profile.id)
+        else {
+            reconnectAttempts = 0
+            lastConnectedProfile = nil
+            showNotification(title: "FortiVPN Disconnected", body: "Cannot reconnect — no password")
+            updateIcon()
+            return
+        }
+
+        setLoading(true)
+
+        // Wait a few seconds for network to recover, then reconnect
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            let resp = self?.state.client.connectWithPassword(name: profileName, password: password)
+            DispatchQueue.main.async {
+                self?.setLoading(false)
+                self?.state.refresh()
+                self?.updateIcon()
+                if resp?.ok == true {
+                    self?.reconnectAttempts = 0
+                    self?.showNotification(title: "FortiVPN Reconnected", body: "Connected to \(profileName)")
+                }
+                // If failed, onDaemonStatusChanged will fire again and retry
+            }
         }
     }
 
@@ -110,6 +153,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.state.refresh()
                 self?.updateIcon()
                 if resp?.ok == true {
+                    self?.lastConnectedProfile = profileName
+                    self?.reconnectAttempts = 0
                     self?.showNotification(title: "FortiVPN Connected", body: "Connected to \(profileName)")
                 } else {
                     self?.showNotification(title: "Connection Failed", body: resp?.message ?? "Unknown error")
@@ -119,6 +164,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func doDisconnect() {
+        // Manual disconnect — don't auto-reconnect
+        lastConnectedProfile = nil
+        reconnectAttempts = 0
         setLoading(true)
 
         DispatchQueue.global().async { [weak self] in
