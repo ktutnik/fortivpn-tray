@@ -7,15 +7,35 @@ mod vpn;
 
 use std::sync::{Arc, Mutex};
 
+fn init_logger() {
+    // macOS: unified logging (Console.app, `log stream`)
+    #[cfg(feature = "macos-logging")]
+    {
+        oslog::OsLogger::new("com.fortivpn-tray")
+            .level_filter(log::LevelFilter::Info)
+            .category_level_filter("ipc", log::LevelFilter::Debug)
+            .category_level_filter("vpn", log::LevelFilter::Debug)
+            .init()
+            .ok();
+    }
+
+    // Linux/Windows: env_logger (stderr, RUST_LOG env var)
+    #[cfg(feature = "generic-logging")]
+    {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .init();
+    }
+
+    // Fallback if no logging feature enabled
+    #[cfg(not(any(feature = "macos-logging", feature = "generic-logging")))]
+    {
+        let _ = log::LevelFilter::Info;
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    // Initialize macOS unified logging (visible in Console.app)
-    oslog::OsLogger::new("com.fortivpn-tray")
-        .level_filter(log::LevelFilter::Info)
-        .category_level_filter("ipc", log::LevelFilter::Debug)
-        .category_level_filter("vpn", log::LevelFilter::Debug)
-        .init()
-        .expect("Failed to initialize logger");
+    init_logger();
 
     log::info!(target: "daemon", "FortiVPN daemon starting");
 

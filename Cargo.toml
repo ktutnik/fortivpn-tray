@@ -13,9 +13,10 @@ edition = "2021"
 [dependencies]
 fortivpn = { path = "crates/fortivpn" }
 
-# Logging (macOS unified logging via os_log)
+# Logging
 log = "0.4"
-oslog = "0.2"
+oslog = { version = "0.2", optional = true }
+env_logger = { version = "0.11", optional = true }
 
 # Notifications
 notify-rust = "4"
@@ -29,6 +30,11 @@ serde_json = "1"
 keyring = { version = "3", features = ["apple-native"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
+
+[features]
+default = ["macos-logging"]
+macos-logging = ["dep:oslog"]
+generic-logging = ["dep:env_logger"]
 
 [[bin]]
 name = "fortivpn-daemon"
