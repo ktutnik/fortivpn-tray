@@ -92,11 +92,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // VPN dropped — try auto-reconnect
+        // VPN state changed
         if wasConnected && !state.isConnected {
-            let reason = state.status.hasPrefix("error") ? String(state.status.dropFirst(7)) : "Connection lost"
+            // Clean disconnect (CLI or UI) — status is "disconnected"
+            // Unexpected drop — status is "error: ..."
+            let isError = state.status.hasPrefix("error")
+            let reason = isError ? String(state.status.dropFirst(7)) : "Disconnected"
 
-            if reconnectAttempts < maxReconnectAttempts, let profileName = lastConnectedProfile {
+            if isError, reconnectAttempts < maxReconnectAttempts, let profileName = lastConnectedProfile {
                 reconnectAttempts += 1
                 showNotification(title: "FortiVPN Reconnecting", body: "Attempt \(reconnectAttempts)/\(maxReconnectAttempts) — \(reason)")
                 attemptReconnect(profileName: profileName)
