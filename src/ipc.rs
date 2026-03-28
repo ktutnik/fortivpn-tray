@@ -782,9 +782,7 @@ mod tests {
     fn make_state() -> AppState {
         let store = make_store();
         AppState {
-            vpn: std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::vpn::VpnManager::new(),
-            )),
+            vpn: std::sync::Arc::new(tokio::sync::Mutex::new(crate::vpn::VpnManager::new())),
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
         }
     }
@@ -950,7 +948,11 @@ mod tests {
     #[tokio::test]
     async fn test_ipc_connect_with_password_profile_not_found() {
         let state = make_state();
-        let resp = handle_ipc_command(&state, r#"connect_with_password {"name":"nonexistent","password":"x"}"#).await;
+        let resp = handle_ipc_command(
+            &state,
+            r#"connect_with_password {"name":"nonexistent","password":"x"}"#,
+        )
+        .await;
         assert!(!resp.ok);
         assert!(resp.message.contains("not found"));
     }

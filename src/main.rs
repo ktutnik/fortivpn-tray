@@ -22,8 +22,7 @@ fn init_logger() {
     // Linux/Windows: env_logger (stderr, RUST_LOG env var)
     #[cfg(feature = "generic-logging")]
     {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
     // Fallback if no logging feature enabled

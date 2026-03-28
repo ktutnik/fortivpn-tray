@@ -352,10 +352,7 @@ mod tests {
         manager
             .session_passwords
             .insert("profile-1".to_string(), "secret123".to_string());
-        assert_eq!(
-            manager.get_password("profile-1").unwrap(),
-            "secret123"
-        );
+        assert_eq!(manager.get_password("profile-1").unwrap(), "secret123");
     }
 
     #[test]
