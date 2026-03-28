@@ -384,7 +384,7 @@ mod tests {
 
         manager.disconnect().await.unwrap();
 
-        assert!(manager.session_passwords.get("profile-1").is_none());
+        assert!(!manager.session_passwords.contains_key("profile-1"));
         assert_eq!(manager.status, VpnStatus::Disconnected);
     }
 
