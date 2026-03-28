@@ -242,6 +242,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             }
                         }
                     }
+                    crate::notification::post_distributed_notification(
+                        "com.fortivpn-tray.status-changed",
+                    );
                     IpcResponse {
                         ok: true,
                         message: "Connected".into(),
@@ -353,6 +356,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             }
                         }
                     }
+                    crate::notification::post_distributed_notification(
+                        "com.fortivpn-tray.status-changed",
+                    );
                     IpcResponse {
                         ok: true,
                         message: "Connected".into(),
@@ -373,6 +379,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
         "disconnect" => {
             let mut vpn = state.vpn.lock().await;
             let _ = vpn.disconnect().await;
+            crate::notification::post_distributed_notification(
+                "com.fortivpn-tray.status-changed",
+            );
             IpcResponse {
                 ok: true,
                 message: "Disconnected".into(),

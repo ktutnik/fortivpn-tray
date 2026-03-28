@@ -81,8 +81,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func onDaemonStatusChanged() {
         let wasConnected = state.isConnected
+        let oldProfile = state.connectedProfile
         state.refresh()
         updateIcon()
+
+        // Connected (e.g. from CLI)
+        if !wasConnected && state.isConnected {
+            lastConnectedProfile = state.connectedProfile
+            reconnectAttempts = 0
+            return
+        }
 
         // VPN dropped — try auto-reconnect
         if wasConnected && !state.isConnected {
@@ -97,6 +105,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 lastConnectedProfile = nil
                 showNotification(title: "FortiVPN Disconnected", body: reason)
             }
+        }
+
+        // Disconnected (e.g. from CLI)
+        if wasConnected && !state.isConnected && reconnectAttempts == 0 {
+            // Already handled above or manual disconnect
         }
     }
 
