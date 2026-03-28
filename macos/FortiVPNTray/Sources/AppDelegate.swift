@@ -89,6 +89,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !wasConnected && state.isConnected {
             lastConnectedProfile = state.connectedProfile
             reconnectAttempts = 0
+            showNotification(title: "FortiVPN Connected", body: "Connected to \(state.connectedProfile ?? "VPN")")
             return
         }
 
