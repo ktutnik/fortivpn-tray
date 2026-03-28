@@ -20,6 +20,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        // Listen for status changes from the daemon (zero-polling, instant)
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(onDaemonStatusChanged),
+            name: NSNotification.Name("com.fortivpn-tray.status-changed"),
+            object: nil
+        )
     }
 
     // Rebuild menu fresh every time the user clicks the tray icon
@@ -65,6 +73,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
+    }
+
+    @objc func onDaemonStatusChanged() {
+        let wasConnected = state.isConnected
+        state.refresh()
+        updateIcon()
+
+        // Notify user if VPN dropped
+        if wasConnected && !state.isConnected {
+            let reason = state.status.hasPrefix("error") ? String(state.status.dropFirst(7)) : "Connection lost"
+            showNotification(title: "FortiVPN Disconnected", body: reason)
+        }
     }
 
     // MARK: - Connect / Disconnect

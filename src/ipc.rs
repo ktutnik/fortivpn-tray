@@ -230,6 +230,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                                 "FortiVPN Disconnected",
                                                 &reason,
                                             );
+                                            crate::notification::post_distributed_notification(
+                                                "com.fortivpn-tray.status-changed",
+                                            );
                                             break;
                                         }
                                     }
@@ -336,6 +339,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                             crate::notification::send_notification(
                                                 "FortiVPN Disconnected",
                                                 &reason,
+                                            );
+                                            crate::notification::post_distributed_notification(
+                                                "com.fortivpn-tray.status-changed",
                                             );
                                             break;
                                         }
