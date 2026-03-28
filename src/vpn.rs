@@ -86,7 +86,7 @@ impl VpnManager {
             &profile.host,
             profile.port,
             &profile.username,
-            &password,
+            password,
             &profile.trusted_cert,
             helper,
         )
@@ -342,5 +342,107 @@ mod tests {
         manager.disconnect().await.unwrap();
         manager.disconnect().await.unwrap();
         assert_eq!(manager.status, VpnStatus::Disconnected);
+    }
+
+    // -- Session password tests --
+
+    #[test]
+    fn test_get_password_from_session_map() {
+        let mut manager = VpnManager::new();
+        manager
+            .session_passwords
+            .insert("profile-1".to_string(), "secret123".to_string());
+        assert_eq!(
+            manager.get_password("profile-1").unwrap(),
+            "secret123"
+        );
+    }
+
+    #[test]
+    fn test_get_password_session_map_takes_priority() {
+        let mut manager = VpnManager::new();
+        // Session password should be returned even if keychain might have a different one
+        manager
+            .session_passwords
+            .insert("profile-1".to_string(), "session-pw".to_string());
+        let result = manager.get_password("profile-1").unwrap();
+        assert_eq!(result, "session-pw");
+    }
+
+    #[test]
+    fn test_get_password_no_session_no_keychain() {
+        let manager = VpnManager::new();
+        // No session password, keychain will fail for non-existent profile
+        assert!(manager.get_password("nonexistent-id").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_clears_session_password() {
+        let mut manager = VpnManager::new();
+        manager.connected_profile_id = Some("profile-1".to_string());
+        manager
+            .session_passwords
+            .insert("profile-1".to_string(), "pw".to_string());
+        manager.status = VpnStatus::Connected;
+
+        manager.disconnect().await.unwrap();
+
+        assert!(manager.session_passwords.get("profile-1").is_none());
+        assert_eq!(manager.status, VpnStatus::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_password_rejects_when_connected() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+
+        let profile = VpnProfile {
+            id: "p1".into(),
+            name: "Test".into(),
+            host: "h".into(),
+            port: 443,
+            username: "u".into(),
+            trusted_cert: "".into(),
+        };
+
+        let result = manager.connect_with_password(&profile, "pw").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Already connected"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_death_sets_error() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+        manager.connected_profile_id = Some("p1".to_string());
+
+        manager
+            .handle_session_death("LCP echo timeout".to_string())
+            .await;
+
+        assert_eq!(
+            manager.status,
+            VpnStatus::Error("LCP echo timeout".to_string())
+        );
+        assert!(manager.connected_profile_id.is_none());
+        assert!(manager.session.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_death_clears_monitor() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+        manager.monitor_handle = Some(tokio::spawn(async {}));
+
+        manager.handle_session_death("died".to_string()).await;
+
+        assert!(manager.monitor_handle.is_none());
+    }
+
+    #[test]
+    fn test_vpn_status_is_busy() {
+        // isBusy is checked in Swift, but test the Rust status variants that map to it
+        assert_ne!(VpnStatus::Connecting, VpnStatus::Disconnected);
+        assert_ne!(VpnStatus::Disconnecting, VpnStatus::Disconnected);
     }
 }

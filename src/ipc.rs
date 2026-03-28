@@ -776,4 +776,219 @@ mod tests {
         assert_eq!(deserialized.id, "123");
         assert_eq!(deserialized.port, 443);
     }
+
+    // -- IPC command handler tests --
+
+    fn make_state() -> AppState {
+        let store = make_store();
+        AppState {
+            vpn: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::vpn::VpnManager::new(),
+            )),
+            store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ipc_status_disconnected() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "status").await;
+        assert!(resp.ok);
+        let data = resp.data.unwrap();
+        assert_eq!(data["status"], "disconnected");
+        assert!(data["profile"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_list_profiles() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "list").await;
+        assert!(resp.ok);
+        let data = resp.data.unwrap();
+        let profiles = data.as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["name"], "Office VPN");
+        assert_eq!(profiles[1]["port"], 8443);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_get_profiles_returns_all_fields() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "get_profiles").await;
+        assert!(resp.ok);
+        let data = resp.data.unwrap();
+        let profiles = data.as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        // Verify all fields present
+        let p = &profiles[0];
+        assert!(p.get("id").is_some());
+        assert!(p.get("name").is_some());
+        assert!(p.get("host").is_some());
+        assert!(p.get("port").is_some());
+        assert!(p.get("username").is_some());
+        assert!(p.get("trusted_cert").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_save_profile_new() {
+        let state = make_state();
+        let json = r#"{"name":"New VPN","host":"vpn.new.com","port":443,"username":"new","trusted_cert":""}"#;
+        let resp = handle_ipc_command(&state, &format!("save_profile {json}")).await;
+        assert!(resp.ok);
+        assert_eq!(resp.message, "Saved");
+        // Verify ID was generated
+        let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+        assert!(!id.is_empty());
+        // Verify profile was added
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.profiles.len(), 3);
+        assert!(store.get(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_save_profile_update_existing() {
+        let state = make_state();
+        let json = r#"{"id":"id-1","name":"Updated VPN","host":"vpn.updated.com","port":9443,"username":"updated","trusted_cert":"abc"}"#;
+        let resp = handle_ipc_command(&state, &format!("save_profile {json}")).await;
+        assert!(resp.ok);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.profiles.len(), 2); // No new profile added
+        let p = store.get("id-1").unwrap();
+        assert_eq!(p.name, "Updated VPN");
+        assert_eq!(p.host, "vpn.updated.com");
+        assert_eq!(p.port, 9443);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_save_profile_invalid_json() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "save_profile not-json").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("Invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_save_profile_missing_arg() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "save_profile").await;
+        assert!(!resp.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_delete_profile() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "delete_profile id-1").await;
+        assert!(resp.ok);
+        assert_eq!(resp.message, "Deleted");
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.profiles.len(), 1);
+        assert!(store.get("id-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_delete_profile_missing_arg() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "delete_profile").await;
+        assert!(!resp.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_missing_arg() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "connect").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("Usage"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_profile_not_found() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "connect nonexistent").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_no_password() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "connect Office").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("No password"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_with_password_missing_arg() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "connect_with_password").await;
+        assert!(!resp.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_with_password_invalid_json() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "connect_with_password not-json").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("Invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_with_password_missing_name() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, r#"connect_with_password {"password":"x"}"#).await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("name"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_with_password_missing_password() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, r#"connect_with_password {"name":"Office"}"#).await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connect_with_password_profile_not_found() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, r#"connect_with_password {"name":"nonexistent","password":"x"}"#).await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_disconnect_when_not_connected() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "disconnect").await;
+        assert!(resp.ok);
+        assert_eq!(resp.message, "Disconnected");
+    }
+
+    #[tokio::test]
+    async fn test_ipc_unknown_command() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "foobar").await;
+        assert!(!resp.ok);
+        assert!(resp.message.contains("Unknown command"));
+    }
+
+    #[tokio::test]
+    async fn test_ipc_set_password_missing_args() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "set_password").await;
+        assert!(!resp.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_set_password_missing_password() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "set_password id-1").await;
+        assert!(!resp.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_has_password_missing_arg() {
+        let state = make_state();
+        let resp = handle_ipc_command(&state, "has_password").await;
+        assert!(!resp.ok);
+    }
 }
