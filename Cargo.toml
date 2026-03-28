@@ -13,6 +13,10 @@ edition = "2021"
 [dependencies]
 fortivpn = { path = "crates/fortivpn" }
 
+# Logging (macOS unified logging via os_log)
+log = "0.4"
+oslog = "0.2"
+
 # Notifications
 notify-rust = "4"
 

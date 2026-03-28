@@ -48,6 +48,7 @@ pub struct IpcResponse {
 
 pub async fn start_ipc_server(state: AppState) {
     let sock = socket_path();
+    log::info!(target: "ipc", "Socket path: {}", sock.display());
 
     // Remove stale socket
     let _ = std::fs::remove_file(&sock);
@@ -55,7 +56,7 @@ pub async fn start_ipc_server(state: AppState) {
     let listener = match UnixListener::bind(&sock) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("IPC: failed to bind socket: {e}");
+            log::error!(target: "ipc", "Failed to bind socket: {e}");
             return;
         }
     };
@@ -98,6 +99,8 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     let command = parts[0];
     let arg = parts.get(1).map(|s| s.trim());
+
+    log::debug!(target: "ipc", "Command: {command}");
 
     match command {
         "status" => {
@@ -226,6 +229,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                             Err(_) => break "Connection lost".to_string(),
                                         }
                                     };
+                                    log::warn!(target: "vpn", "Session died: {reason}");
                                     {
                                         let mut vpn = st.vpn.lock().await;
                                         vpn.handle_session_death(reason.clone()).await;
@@ -242,6 +246,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             }
                         }
                     }
+                    log::info!(target: "vpn", "Connected successfully");
                     crate::notification::post_distributed_notification(
                         "com.fortivpn-tray.status-changed",
                     );
@@ -252,6 +257,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                     }
                 }
                 Err(e) => {
+                    log::error!(target: "vpn", "Connection failed: {e}");
                     crate::notification::send_notification("FortiVPN Connection Failed", &e);
                     IpcResponse {
                         ok: false,
@@ -340,6 +346,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                             Err(_) => break "Connection lost".to_string(),
                                         }
                                     };
+                                    log::warn!(target: "vpn", "Session died: {reason}");
                                     {
                                         let mut vpn = st.vpn.lock().await;
                                         vpn.handle_session_death(reason.clone()).await;
@@ -356,6 +363,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                             }
                         }
                     }
+                    log::info!(target: "vpn", "Connected successfully");
                     crate::notification::post_distributed_notification(
                         "com.fortivpn-tray.status-changed",
                     );
@@ -366,6 +374,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                     }
                 }
                 Err(e) => {
+                    log::error!(target: "vpn", "Connection failed: {e}");
                     crate::notification::send_notification("FortiVPN Connection Failed", &e);
                     IpcResponse {
                         ok: false,

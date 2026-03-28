@@ -1,6 +1,9 @@
 import AppKit
+import os.log
 import Security
 import SwiftUI
+
+private let logger = Logger(subsystem: "com.fortivpn-tray", category: "ui")
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
@@ -9,6 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var isLoading = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        logger.info("FortiVPN Tray starting")
         ensureDaemonRunning()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -81,7 +85,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func onDaemonStatusChanged() {
         let wasConnected = state.isConnected
-        let oldProfile = state.connectedProfile
         state.refresh()
         updateIcon()
 
@@ -89,6 +92,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !wasConnected && state.isConnected {
             lastConnectedProfile = state.connectedProfile
             reconnectAttempts = 0
+            logger.info("VPN connected to \(self.state.connectedProfile ?? "unknown")")
             showNotification(title: "FortiVPN Connected", body: "Connected to \(state.connectedProfile ?? "VPN")")
             return
         }
@@ -102,11 +106,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if isError, reconnectAttempts < maxReconnectAttempts, let profileName = lastConnectedProfile {
                 reconnectAttempts += 1
+                logger.warning("VPN dropped: \(reason). Reconnecting \(self.reconnectAttempts)/\(self.maxReconnectAttempts)")
                 showNotification(title: "FortiVPN Reconnecting", body: "Attempt \(reconnectAttempts)/\(maxReconnectAttempts) — \(reason)")
                 attemptReconnect(profileName: profileName)
             } else {
                 reconnectAttempts = 0
                 lastConnectedProfile = nil
+                logger.info("VPN disconnected: \(reason)")
                 showNotification(title: "FortiVPN Disconnected", body: reason)
             }
         }
