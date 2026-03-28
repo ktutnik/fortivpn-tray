@@ -215,9 +215,9 @@ Since passwords are stored in the OS keychain, the CLI connects without any inte
 
 ## Design
 
-### Architecture
+### Architecture Overview
 
-The app follows the **Tailscale pattern** — a native Swift UI app communicating with a Rust daemon over a Unix socket.
+The app follows the [Tailscale pattern](https://tailscale.com/) — separating the **UI** from the **VPN engine** into two processes that communicate over IPC.
 
 ```mermaid
 graph TD
@@ -272,56 +272,182 @@ graph TD
     style cli fill:#6b7280,stroke:#4b5563,color:#fff
 ```
 
+**Why two processes?** Battery efficiency. A single process with both UI and VPN would need to run a GUI event loop constantly. By splitting them, the Swift UI app sleeps completely when idle (zero CPU), while the Rust daemon blocks on socket I/O (near-zero CPU). macOS distributed notifications (`CFNotificationCenter`) connect them instantly when state changes — no polling.
+
+### The Four Components
+
+#### 1. Swift UI App (`macos/FortiVPNTray/`)
+
+The user-facing macOS app. Provides the tray icon, menu, settings window, and password prompt. Has **no VPN logic** — it's a thin controller that sends commands to the daemon.
+
+| File | What it does |
+|------|-------------|
+| [`App.swift`](macos/FortiVPNTray/Sources/App.swift) | Entry point. Sets `NSApp.setActivationPolicy(.accessory)` to hide from Dock. |
+| [`AppDelegate.swift`](macos/FortiVPNTray/Sources/AppDelegate.swift) | Tray icon (`NSStatusItem`), menu building (`NSMenuDelegate`), connect/disconnect actions, password prompt (`NSAlert`), auto-reconnect logic, macOS Keychain access. |
+| [`DaemonClient.swift`](macos/FortiVPNTray/Sources/DaemonClient.swift) | Unix socket client. Opens a connection to the daemon, sends a text command, reads JSON response. Each command opens a fresh socket (stateless). |
+| [`VPNState.swift`](macos/FortiVPNTray/Sources/VPNState.swift) | `ObservableObject` holding profiles and connection status. `refresh()` calls `DaemonClient` to fetch latest state. Checks Keychain for password status. |
+| [`SettingsView.swift`](macos/FortiVPNTray/Sources/SettingsView.swift) | SwiftUI `NavigationSplitView` — sidebar with profile list, detail with edit form. |
+| [`ProfileFormView.swift`](macos/FortiVPNTray/Sources/ProfileFormView.swift) | SwiftUI form for creating/editing profiles (name, host, port, username, cert fingerprint, password). |
+| [`Models.swift`](macos/FortiVPNTray/Sources/Models.swift) | `Codable` structs matching the daemon's JSON: `VpnProfile`, `IpcResponse`, `StatusResponse`. |
+
+**Key interaction**: When you click "Connect" in the tray menu, the Swift app reads the password from macOS Keychain (Swift has UI access, so no auth dialogs), then sends `connect_with_password {"name":"MIMS SG","password":"..."}` to the daemon via the Unix socket. The daemon handles the actual VPN connection.
+
+**Status sync**: The daemon posts `CFNotificationCenter` distributed notifications when VPN state changes. The Swift app listens via `DistributedNotificationCenter.default().addObserver(...)` and instantly updates the tray icon — zero polling.
+
+#### 2. Rust Daemon (`src/`)
+
+A headless background process running a tokio async runtime. Owns all VPN logic, profile storage, and serves the IPC protocol.
+
+| File | What it does |
+|------|-------------|
+| [`main.rs`](src/main.rs) | Entry point. Initializes logging (`os_log` on macOS, `env_logger` on Linux/Windows), loads profiles, checks helper installation, starts IPC server. |
+| [`ipc.rs`](src/ipc.rs) | Unix socket server at `~/Library/Application Support/fortivpn-tray/ipc.sock`. Accepts connections, reads newline-delimited text commands, dispatches to handlers, returns JSON. Supports: `status`, `list`, `connect`, `disconnect`, `connect_with_password`, `get_profiles`, `save_profile`, `delete_profile`, `set_password`, `has_password`. |
+| [`vpn.rs`](src/vpn.rs) | `VpnManager` — state machine tracking `Disconnected/Connecting/Connected/Disconnecting/Error`. Manages helper client, session passwords, and the connection lifecycle. |
+| [`profile.rs`](src/profile.rs) | `ProfileStore` — loads/saves `profiles.json`. CRUD operations with auto-save. |
+| [`keychain.rs`](src/keychain.rs) | Thin wrapper around `keyring` crate for password storage (macOS Keychain / Windows Credential Manager / Linux Secret Service). |
+| [`notification.rs`](src/notification.rs) | Desktop notifications via `notify-rust`. Also posts macOS distributed notifications (spawns `/usr/bin/swift` to call `DistributedNotificationCenter` since tokio threads have no CFRunLoop). |
+| [`installer.rs`](src/installer.rs) | One-time helper daemon installation. Copies binary to `/Library/PrivilegedHelperTools/`, loads plist via `launchctl`, prompts for admin password via `osascript`. |
+
+**IPC Protocol**: Text-based, one command per line, one JSON response per line. Example:
+```
+→ status
+← {"ok":true,"message":"ok","data":{"status":"connected","profile":"MIMS SG"}}
+
+→ connect_with_password {"name":"MIMS SG","password":"secret"}
+← {"ok":true,"message":"Connected"}
+
+→ disconnect
+← {"ok":true,"message":"Disconnected"}
+```
+
+#### 3. VPN Library (`crates/fortivpn/`)
+
+The core VPN protocol implementation. Pure Rust, zero UI dependencies, fully cross-platform. This is where the actual FortiGate SSL-VPN protocol is implemented.
+
+| File | What it does |
+|------|-------------|
+| [`lib.rs`](crates/fortivpn/src/lib.rs) | `VpnSession` — orchestrates the 6-phase connection: auth, tunnel, PPP, TUN, bridge, routing. `VpnEvent` watch channel for session death detection. |
+| [`auth.rs`](crates/fortivpn/src/auth.rs) | TLS connection + HTTP POST authentication. Extracts `SVPNCOOKIE` and parses the XML configuration response. Optional SHA256 certificate pinning. |
+| [`bridge.rs`](crates/fortivpn/src/bridge.rs) | Async IP bridge — two tokio tasks running concurrently: TUN-to-TLS and TLS-to-TUN. Handles PPP negotiation (LCP/IPCP) and LCP echo keep-alive. |
+| [`tunnel.rs`](crates/fortivpn/src/tunnel.rs) | FortiGate proprietary framing: 6-byte header with magic number `0x5050` + payload length. Encode/decode frames. |
+| [`ppp.rs`](crates/fortivpn/src/ppp.rs) | PPP packet encoding/decoding. LCP (link config, echo, terminate) and IPCP (IP assignment, DNS) state machines. |
+| [`routing.rs`](crates/fortivpn/src/routing.rs) | Route/DNS configuration via helper. Split tunnel (specific routes) or full tunnel (`0.0.0.0/1` + `128.0.0.0/1`). IPv6 leak prevention. |
+| [`helper.rs`](crates/fortivpn/src/helper.rs) | `HelperClient` — connects to the privileged helper daemon via Unix socket. Sends JSON commands for TUN creation, route/DNS management. Receives TUN file descriptor via `SCM_RIGHTS`. |
+| [`tun.rs`](crates/fortivpn/src/tun.rs) | TUN device creation via `tun2` crate. |
+| [`async_tun.rs`](crates/fortivpn/src/async_tun.rs) | `AsyncRead`/`AsyncWrite` wrapper for raw TUN fd using `tokio::io::unix::AsyncFd`. |
+
+#### 4. Privileged Helper (`crates/fortivpn-helper/`)
+
+A single-file binary ([`main.rs`](crates/fortivpn-helper/src/main.rs)) that runs as root via macOS `launchd`. It's the only component that needs elevated privileges.
+
+**Why separate?** Creating TUN devices and modifying routes requires root. Instead of running the entire app as root, only this small, auditable binary runs privileged. It communicates with the daemon via a Unix socket at `/var/run/fortivpn-helper.sock`.
+
+**Socket activation**: The helper is launched on-demand by `launchd` when something connects to its socket. It handles the request, then exits after 30 seconds of inactivity. launchd restarts it on the next connection.
+
+**Commands**: `create_tun`, `destroy_tun`, `add_route`, `delete_route`, `configure_dns`, `restore_dns`, `ping`, `version`, `shutdown`.
+
+#### 5. Cross-Platform UI (`crates/fortivpn-ui/`)
+
+An alternative UI for Windows and Linux using Rust + `tray-icon`/`muda` + `wry` (WebView). Shares the same IPC protocol as the Swift app.
+
+| File | What it does |
+|------|-------------|
+| [`main.rs`](crates/fortivpn-ui/src/main.rs) | `tao` event loop + tray icon + on-demand WebView for settings. |
+| [`ipc_client.rs`](crates/fortivpn-ui/src/ipc_client.rs) | Unix socket IPC client (Rust equivalent of Swift's `DaemonClient`). |
+| [`resources/settings.html`](crates/fortivpn-ui/resources/settings.html) | HTML/CSS/JS settings page with sidebar + form. |
+
 ### Key Design Decisions
 
-- **Swift + Rust split** — Swift owns all UI (tray icon, menu, settings window, password prompt). Rust runs as a headless daemon handling VPN protocol, profile storage, keychain access, and IPC. They communicate over a Unix domain socket using JSON commands.
+- **Swift + Rust split** — Swift owns all macOS UI. Rust owns VPN logic and runs cross-platform. They communicate via Unix socket IPC. This gives native macOS UX (Dock behavior, Spaces, dark mode) with zero battery drain.
 
-- **Native Rust protocol implementation** — TLS, HTTP auth, PPP framing, and IP bridging are all implemented from scratch. No dependency on `openfortivpn` or any external VPN binary.
+- **Native Rust protocol** — TLS, HTTP auth, PPP framing, IP bridging all implemented from scratch. No dependency on `openfortivpn` or any external binary.
 
-- **Near-zero battery drain** — No polling, no WebKit, no background timers. The Swift app sleeps completely when idle. The Rust daemon blocks on socket `accept()`. State refreshes only when you interact with the tray menu.
+- **Near-zero battery** — No polling. Swift app sleeps until you click the tray icon. Daemon blocks on `accept()`. Status changes propagate via macOS distributed notifications (kernel-level, zero-cost).
 
-- **Privilege separation** — Only the helper process runs with elevated privileges (as a launchd daemon). It creates the TUN device and passes the file descriptor back via `SCM_RIGHTS`. The main app stays unprivileged.
+- **Privilege separation** — Only the helper runs as root. Main app and daemon are unprivileged. Helper is socket-activated by launchd (starts on demand, exits after idle).
 
-- **Persistent helper** — The privileged helper is managed by launchd with socket activation. No repeated admin password prompts — install once, connect forever.
+- **Auto-reconnect** — When VPN drops unexpectedly (error status), the Swift app automatically retries up to 3 times with 3-second delays. Manual disconnects don't trigger reconnect.
 
-- **IPv6 leak prevention** — Automatically disables IPv6 on active interfaces when the VPN connects to prevent traffic leaking outside the tunnel, and restores it on disconnect.
-
-- **Secure credential storage** — VPN passwords are stored in macOS Keychain, never on disk.
+- **Credential isolation** — On macOS, only the Swift app accesses the Keychain (it has UI access for auth dialogs). The daemon never touches the Keychain — passwords are passed via IPC. This avoids macOS Secure Keyboard Entry blocking issues.
 
 ### Project Structure
 
 ```
 fortivpn-tray/
-├── macos/FortiVPNTray/          # Swift macOS app
+├── macos/FortiVPNTray/           # Swift macOS app (UI only)
 │   ├── Sources/
-│   │   ├── App.swift            # @main entry point
-│   │   ├── AppDelegate.swift    # NSStatusItem, NSMenu, tray icon
-│   │   ├── VPNState.swift       # Observable state (profiles, status)
-│   │   ├── DaemonClient.swift   # Unix socket IPC client
-│   │   ├── SettingsView.swift   # SwiftUI settings window
-│   │   ├── ProfileFormView.swift # SwiftUI profile edit form
-│   │   └── Models.swift         # Codable data models
+│   │   ├── App.swift             # Entry point
+│   │   ├── AppDelegate.swift     # Tray, menu, connect/disconnect, keychain
+│   │   ├── VPNState.swift        # Observable state
+│   │   ├── DaemonClient.swift    # IPC client (Unix socket)
+│   │   ├── SettingsView.swift    # SwiftUI settings
+│   │   ├── ProfileFormView.swift # Profile edit form
+│   │   └── Models.swift          # JSON models
 │   └── Package.swift
-├── src/                          # Rust daemon
-│   ├── main.rs                  # Daemon entry point (tokio runtime)
-│   ├── ipc.rs                   # Unix socket IPC server + command handlers
-│   ├── vpn.rs                   # VPN connection lifecycle
-│   ├── profile.rs               # Profile CRUD, JSON persistence
-│   ├── keychain.rs              # macOS Keychain read/write/delete
-│   ├── installer.rs             # Helper daemon installation
-│   └── notification.rs          # Desktop notifications
+├── src/                           # Rust daemon (VPN engine)
+│   ├── main.rs                   # Daemon entry point
+│   ├── ipc.rs                    # IPC server + command handlers
+│   ├── vpn.rs                    # VPN state machine
+│   ├── profile.rs                # Profile storage (JSON)
+│   ├── keychain.rs               # OS credential store
+│   ├── notification.rs           # Notifications + distributed events
+│   └── installer.rs              # Helper installation
 ├── crates/
-│   ├── fortivpn/                # Core VPN library (protocol, auth, tunneling)
-│   ├── fortivpn-helper/         # Privileged helper binary (TUN + routing)
-│   └── fortivpn-cli/            # CLI companion tool
+│   ├── fortivpn/                 # VPN protocol library (cross-platform)
+│   │   └── src/
+│   │       ├── lib.rs            # VpnSession orchestration
+│   │       ├── auth.rs           # TLS + HTTP authentication
+│   │       ├── bridge.rs         # Async IP bridge (TUN to TLS)
+│   │       ├── tunnel.rs         # FortiGate frame encoding
+│   │       ├── ppp.rs            # PPP/LCP/IPCP protocol
+│   │       ├── routing.rs        # Route + DNS management
+│   │       ├── helper.rs         # Helper client (SCM_RIGHTS)
+│   │       ├── tun.rs            # TUN device creation
+│   │       └── async_tun.rs      # Async TUN wrapper
+│   ├── fortivpn-helper/          # Privileged helper (runs as root)
+│   │   └── src/main.rs           # launchd socket-activated daemon
+│   ├── fortivpn-cli/             # CLI companion
+│   │   └── src/main.rs           # fortivpn connect/disconnect/status
+│   └── fortivpn-ui/              # Cross-platform UI (Windows/Linux)
+│       ├── src/
+│       │   ├── main.rs           # tray-icon + wry webview
+│       │   └── ipc_client.rs     # IPC client (Rust)
+│       └── resources/
+│           └── settings.html     # HTML settings page
 ├── resources/
-│   ├── Info.plist               # macOS app bundle metadata
+│   ├── Info.plist                # macOS app bundle metadata
 │   └── com.fortivpn-tray.helper.plist  # launchd daemon config
-├── icons/                        # App and tray icons
-├── install.sh                    # One-command build + install
-├── Cargo.toml                    # Rust workspace root
-└── build.rs                      # Build script (helper binary)
+├── tests/                         # Integration tests
+├── icons/                         # App + tray icons
+├── install.sh                     # Cross-platform install script
+├── uninstall.sh                   # Cross-platform uninstall script
+├── Cargo.toml                     # Rust workspace root
+└── build.rs                       # Build script (helper binary)
 ```
+
+### Running Tests
+
+```bash
+cargo test --workspace            # Run all 276 tests
+cargo test -p fortivpn            # VPN protocol tests only
+cargo clippy --workspace          # Lint
+```
+
+### Logging
+
+Both processes log to macOS unified logging:
+
+```bash
+# Real-time log stream
+log stream --predicate 'subsystem == "com.fortivpn-tray"' --level debug
+
+# Search last hour
+log show --predicate 'subsystem == "com.fortivpn-tray"' --last 1h
+
+# Or open Console.app and search "com.fortivpn-tray"
+```
+
+On Linux/Windows, the daemon logs to stderr via `env_logger` (controlled by `RUST_LOG` env var).
 
 ## How FortiGate SSL-VPN Works
 
