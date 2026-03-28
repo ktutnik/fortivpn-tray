@@ -21,6 +21,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image?.isTemplate = true
         }
 
+        // Add Edit menu so Cmd+C/V/X/A work in text fields
+        setupEditMenu()
+
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -355,6 +358,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let symbolName = name.contains("connected") && !name.contains("dis") ? "shield.fill" : "shield"
         return NSImage(systemSymbolName: symbolName, accessibilityDescription: "VPN")
+    }
+
+    // MARK: - Edit Menu (enables Cmd+C/V/X/A in text fields)
+
+    func setupEditMenu() {
+        let mainMenu = NSMenu()
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+        NSApp.mainMenu = mainMenu
     }
 
     // MARK: - Daemon
