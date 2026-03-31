@@ -570,26 +570,24 @@ mod tests {
     use crate::profile::{ProfileStore, VpnProfile};
 
     fn make_store() -> ProfileStore {
-        ProfileStore {
-            profiles: vec![
-                VpnProfile {
-                    id: "id-1".to_string(),
-                    name: "Office VPN".to_string(),
-                    host: "vpn.office.com".to_string(),
-                    port: 443,
-                    username: "admin".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-                VpnProfile {
-                    id: "id-2".to_string(),
-                    name: "Home VPN".to_string(),
-                    host: "vpn.home.com".to_string(),
-                    port: 8443,
-                    username: "user".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-            ],
-        }
+        ProfileStore::in_memory(vec![
+            VpnProfile {
+                id: "id-1".to_string(),
+                name: "Office VPN".to_string(),
+                host: "vpn.office.com".to_string(),
+                port: 443,
+                username: "admin".to_string(),
+                trusted_cert: "".to_string(),
+            },
+            VpnProfile {
+                id: "id-2".to_string(),
+                name: "Home VPN".to_string(),
+                host: "vpn.home.com".to_string(),
+                port: 8443,
+                username: "user".to_string(),
+                trusted_cert: "".to_string(),
+            },
+        ])
     }
 
     #[test]
@@ -722,26 +720,24 @@ mod tests {
 
     #[test]
     fn test_find_profile_prefers_exact_id_over_name() {
-        let store = ProfileStore {
-            profiles: vec![
-                VpnProfile {
-                    id: "office".to_string(),
-                    name: "Different Name".to_string(),
-                    host: "h".to_string(),
-                    port: 443,
-                    username: "u".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-                VpnProfile {
-                    id: "id-2".to_string(),
-                    name: "office".to_string(),
-                    host: "h2".to_string(),
-                    port: 443,
-                    username: "u2".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-            ],
-        };
+        let store = ProfileStore::in_memory(vec![
+            VpnProfile {
+                id: "office".to_string(),
+                name: "Different Name".to_string(),
+                host: "h".to_string(),
+                port: 443,
+                username: "u".to_string(),
+                trusted_cert: "".to_string(),
+            },
+            VpnProfile {
+                id: "id-2".to_string(),
+                name: "office".to_string(),
+                host: "h2".to_string(),
+                port: 443,
+                username: "u2".to_string(),
+                trusted_cert: "".to_string(),
+            },
+        ]);
         // Should match by exact ID first
         let result = find_profile(&store, "office");
         assert_eq!(result, Some("office".to_string()));
@@ -749,16 +745,14 @@ mod tests {
 
     #[test]
     fn test_find_profile_unicode() {
-        let store = ProfileStore {
-            profiles: vec![VpnProfile {
-                id: "id-1".to_string(),
-                name: "日本語 VPN".to_string(),
-                host: "h".to_string(),
-                port: 443,
-                username: "u".to_string(),
-                trusted_cert: "".to_string(),
-            }],
-        };
+        let store = ProfileStore::in_memory(vec![VpnProfile {
+            id: "id-1".to_string(),
+            name: "日本語 VPN".to_string(),
+            host: "h".to_string(),
+            port: 443,
+            username: "u".to_string(),
+            trusted_cert: "".to_string(),
+        }]);
         let result = find_profile(&store, "日本語");
         assert_eq!(result, Some("id-1".to_string()));
     }

@@ -15,6 +15,8 @@ pub struct VpnProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileStore {
     pub profiles: Vec<VpnProfile>,
+    #[serde(skip)]
+    save_path: Option<PathBuf>,
 }
 
 impl ProfileStore {
@@ -28,18 +30,31 @@ impl ProfileStore {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if path.exists() {
+        let mut store = if path.exists() {
             let data = fs::read_to_string(&path).unwrap_or_default();
             serde_json::from_str(&data).unwrap_or_default()
         } else {
             Self::default()
+        };
+        store.save_path = Some(path);
+        store
+    }
+
+    /// Create an in-memory store that doesn't write to disk. Used for tests.
+    #[cfg(test)]
+    pub fn in_memory(profiles: Vec<VpnProfile>) -> Self {
+        Self {
+            profiles,
+            save_path: None,
         }
     }
 
     pub fn save(&self) {
-        let path = Self::config_path();
-        let data = serde_json::to_string_pretty(self).expect("Failed to serialize profiles");
-        fs::write(path, data).expect("Failed to write profiles");
+        if let Some(ref path) = self.save_path {
+            let data = serde_json::to_string_pretty(self).expect("Failed to serialize profiles");
+            fs::write(path, data).expect("Failed to write profiles");
+        }
+        // If save_path is None (in-memory/test mode), don't write to disk
     }
 
     pub fn add(&mut self, profile: VpnProfile) {
@@ -104,26 +119,24 @@ mod tests {
 
     #[test]
     fn test_profile_store_serialization_roundtrip() {
-        let store = ProfileStore {
-            profiles: vec![
-                VpnProfile {
-                    id: "1".to_string(),
-                    name: "VPN1".to_string(),
-                    host: "host1".to_string(),
-                    port: 443,
-                    username: "user1".to_string(),
-                    trusted_cert: "cert1".to_string(),
-                },
-                VpnProfile {
-                    id: "2".to_string(),
-                    name: "VPN2".to_string(),
-                    host: "host2".to_string(),
-                    port: 8443,
-                    username: "user2".to_string(),
-                    trusted_cert: "cert2".to_string(),
-                },
-            ],
-        };
+        let store = ProfileStore::in_memory(vec![
+            VpnProfile {
+                id: "1".to_string(),
+                name: "VPN1".to_string(),
+                host: "host1".to_string(),
+                port: 443,
+                username: "user1".to_string(),
+                trusted_cert: "cert1".to_string(),
+            },
+            VpnProfile {
+                id: "2".to_string(),
+                name: "VPN2".to_string(),
+                host: "host2".to_string(),
+                port: 8443,
+                username: "user2".to_string(),
+                trusted_cert: "cert2".to_string(),
+            },
+        ]);
         let json = serde_json::to_string(&store).unwrap();
         let deserialized: ProfileStore = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.profiles.len(), 2);
@@ -133,16 +146,14 @@ mod tests {
 
     #[test]
     fn test_profile_store_get() {
-        let store = ProfileStore {
-            profiles: vec![VpnProfile {
-                id: "abc".to_string(),
-                name: "Test".to_string(),
-                host: "host".to_string(),
-                port: 443,
-                username: "user".to_string(),
-                trusted_cert: "".to_string(),
-            }],
-        };
+        let store = ProfileStore::in_memory(vec![VpnProfile {
+            id: "abc".to_string(),
+            name: "Test".to_string(),
+            host: "host".to_string(),
+            port: 443,
+            username: "user".to_string(),
+            trusted_cert: "".to_string(),
+        }]);
         assert!(store.get("abc").is_some());
         assert!(store.get("xyz").is_none());
     }
@@ -154,28 +165,76 @@ mod tests {
         assert!(path.to_string_lossy().contains("profiles.json"));
     }
 
-    // In-memory tests for add/remove/update (avoid filesystem to prevent race conditions)
+    #[test]
+    fn test_in_memory_store_add_does_not_write_disk() {
+        let mut store = ProfileStore::in_memory(vec![]);
+        store.add(VpnProfile {
+            id: "test".into(),
+            name: "Test".into(),
+            host: "h".into(),
+            port: 443,
+            username: "u".into(),
+            trusted_cert: "".into(),
+        });
+        assert_eq!(store.profiles.len(), 1);
+        // No file written — save_path is None
+    }
+
+    #[test]
+    fn test_in_memory_store_remove() {
+        let mut store = ProfileStore::in_memory(vec![VpnProfile {
+            id: "p1".into(),
+            name: "VPN1".into(),
+            host: "h1".into(),
+            port: 443,
+            username: "u1".into(),
+            trusted_cert: "".into(),
+        }]);
+        store.remove("p1");
+        assert!(store.profiles.is_empty());
+    }
+
+    #[test]
+    fn test_in_memory_store_update() {
+        let mut store = ProfileStore::in_memory(vec![VpnProfile {
+            id: "p1".into(),
+            name: "Old".into(),
+            host: "h1".into(),
+            port: 443,
+            username: "u1".into(),
+            trusted_cert: "".into(),
+        }]);
+        store.update(VpnProfile {
+            id: "p1".into(),
+            name: "New".into(),
+            host: "h2".into(),
+            port: 8443,
+            username: "u2".into(),
+            trusted_cert: "cert".into(),
+        });
+        assert_eq!(store.get("p1").unwrap().name, "New");
+        assert_eq!(store.get("p1").unwrap().port, 8443);
+    }
+
     fn make_test_store() -> ProfileStore {
-        ProfileStore {
-            profiles: vec![
-                VpnProfile {
-                    id: "p1".into(),
-                    name: "VPN1".into(),
-                    host: "h1".into(),
-                    port: 443,
-                    username: "u1".into(),
-                    trusted_cert: "".into(),
-                },
-                VpnProfile {
-                    id: "p2".into(),
-                    name: "VPN2".into(),
-                    host: "h2".into(),
-                    port: 8443,
-                    username: "u2".into(),
-                    trusted_cert: "".into(),
-                },
-            ],
-        }
+        ProfileStore::in_memory(vec![
+            VpnProfile {
+                id: "p1".into(),
+                name: "VPN1".into(),
+                host: "h1".into(),
+                port: 443,
+                username: "u1".into(),
+                trusted_cert: "".into(),
+            },
+            VpnProfile {
+                id: "p2".into(),
+                name: "VPN2".into(),
+                host: "h2".into(),
+                port: 8443,
+                username: "u2".into(),
+                trusted_cert: "".into(),
+            },
+        ])
     }
 
     #[test]
@@ -243,32 +302,29 @@ mod tests {
         let json = serde_json::to_string_pretty(&store).unwrap();
         assert!(json.contains("\"profiles\""));
         assert!(json.contains("VPN1"));
-        // Verify it's actually pretty printed (has newlines)
         assert!(json.contains('\n'));
     }
 
     #[test]
     fn test_profile_store_get_returns_correct_profile() {
-        let store = ProfileStore {
-            profiles: vec![
-                VpnProfile {
-                    id: "a".to_string(),
-                    name: "First".to_string(),
-                    host: "h1".to_string(),
-                    port: 443,
-                    username: "u1".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-                VpnProfile {
-                    id: "b".to_string(),
-                    name: "Second".to_string(),
-                    host: "h2".to_string(),
-                    port: 8443,
-                    username: "u2".to_string(),
-                    trusted_cert: "".to_string(),
-                },
-            ],
-        };
+        let store = ProfileStore::in_memory(vec![
+            VpnProfile {
+                id: "a".to_string(),
+                name: "First".to_string(),
+                host: "h1".to_string(),
+                port: 443,
+                username: "u1".to_string(),
+                trusted_cert: "".to_string(),
+            },
+            VpnProfile {
+                id: "b".to_string(),
+                name: "Second".to_string(),
+                host: "h2".to_string(),
+                port: 8443,
+                username: "u2".to_string(),
+                trusted_cert: "".to_string(),
+            },
+        ]);
         let profile = store.get("b").unwrap();
         assert_eq!(profile.name, "Second");
         assert_eq!(profile.host, "h2");
