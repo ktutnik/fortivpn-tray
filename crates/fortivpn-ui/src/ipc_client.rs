@@ -22,8 +22,6 @@ pub struct VpnProfile {
     pub port: u16,
     pub username: String,
     pub trusted_cert: String,
-    #[serde(default)]
-    pub has_password: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +41,7 @@ fn socket_path() -> PathBuf {
 pub fn send_command(command: &str) -> Option<IpcResponse> {
     let stream = UnixStream::connect(socket_path()).ok()?;
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .ok()?;
 
     let mut writer = stream.try_clone().ok()?;
@@ -78,8 +76,9 @@ pub fn get_profiles() -> Vec<VpnProfile> {
     }
 }
 
-pub fn connect_vpn(name: &str) -> Option<IpcResponse> {
-    send_command(&format!("connect {name}"))
+pub fn connect_with_password(name: &str, password: &str) -> Option<IpcResponse> {
+    let json = serde_json::json!({"name": name, "password": password});
+    send_command(&format!("connect_with_password {}", json))
 }
 
 pub fn disconnect_vpn() -> Option<IpcResponse> {
@@ -97,16 +96,14 @@ pub fn delete_profile(id: &str) -> Option<IpcResponse> {
     send_command(&format!("delete_profile {id}"))
 }
 
-pub fn set_password(id: &str, password: &str) -> Option<IpcResponse> {
-    send_command(&format!("set_password {id} {password}"))
-}
-
-#[allow(dead_code)]
-pub fn has_password(id: &str) -> bool {
-    send_command(&format!("has_password {id}"))
-        .and_then(|r| r.data)
-        .and_then(|d| d.get("has_password")?.as_bool())
-        .unwrap_or(false)
+/// Subscribe to daemon status events. Returns a persistent BufReader for reading events.
+pub fn subscribe() -> Option<BufReader<UnixStream>> {
+    let stream = UnixStream::connect(socket_path()).ok()?;
+    stream.set_read_timeout(None).ok()?; // No timeout for persistent connection
+    let mut writer = stream.try_clone().ok()?;
+    writeln!(writer, "subscribe").ok()?;
+    writer.flush().ok()?;
+    Some(BufReader::new(stream))
 }
 
 pub fn is_daemon_running() -> bool {

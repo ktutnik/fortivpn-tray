@@ -965,7 +965,9 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "image",
+ "keyring",
  "muda",
+ "notify-rust",
  "serde",
  "serde_json",
  "tao",
