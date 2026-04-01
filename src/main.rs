@@ -42,9 +42,12 @@ async fn main() {
 
     let vpn_manager = vpn::VpnManager::new();
 
+    let (status_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
     let state = ipc::AppState {
         vpn: Arc::new(tokio::sync::Mutex::new(vpn_manager)),
         store: Arc::new(Mutex::new(store)),
+        status_tx,
     };
 
     if !installer::is_helper_installed() {

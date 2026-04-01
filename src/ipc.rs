@@ -15,6 +15,7 @@ pub type StoreState = Arc<Mutex<ProfileStore>>;
 pub struct AppState {
     pub vpn: VpnState,
     pub store: StoreState,
+    pub status_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 pub fn socket_path() -> PathBuf {
@@ -79,12 +80,17 @@ pub async fn start_ipc_server(state: AppState) {
 
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let (reader, mut writer) = stream.into_split();
+            let (reader, writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
 
+            let mut writer = tokio::io::BufWriter::new(writer);
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let cmd = line.trim().to_string();
+                if cmd == "subscribe" {
+                    handle_subscribe(&state_clone, &mut writer).await;
+                    break;
+                }
                 let response = handle_ipc_command(&state_clone, &cmd).await;
                 let json = serde_json::to_string(&response).unwrap_or_default();
                 let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
@@ -92,6 +98,29 @@ pub async fn start_ipc_server(state: AppState) {
                 line.clear();
             }
         });
+    }
+}
+
+async fn handle_subscribe(
+    state: &AppState,
+    writer: &mut tokio::io::BufWriter<tokio::net::unix::OwnedWriteHalf>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let mut rx = state.status_tx.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(event_json) => {
+                let line = format!("{}\n", event_json);
+                if writer.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if writer.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        }
     }
 }
 
@@ -244,6 +273,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                     crate::notification::post_distributed_notification(
                                         "com.fortivpn-tray.status-changed",
                                     );
+                                    let _ = st.status_tx.send(
+                                        serde_json::json!({"event":"status","data":{"status":format!("error: {reason}"),"profile":null}}).to_string()
+                                    );
                                 });
                                 vpn.monitor_handle = Some(handle);
                             }
@@ -252,6 +284,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                     log::info!(target: "vpn", "Connected successfully");
                     crate::notification::post_distributed_notification(
                         "com.fortivpn-tray.status-changed",
+                    );
+                    let _ = state.status_tx.send(
+                        serde_json::json!({"event":"status","data":{"status":"connected","profile":profile.name}}).to_string()
                     );
                     IpcResponse {
                         ok: true,
@@ -262,6 +297,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                 Err(e) => {
                     log::error!(target: "vpn", "Connection failed: {e}");
                     crate::notification::send_notification("FortiVPN Connection Failed", &e);
+                    let _ = state.status_tx.send(
+                        serde_json::json!({"event":"status","data":{"status":format!("error: {e}"),"profile":null}}).to_string()
+                    );
                     IpcResponse {
                         ok: false,
                         message: format!("Failed: {e}"),
@@ -276,6 +314,9 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             let _ = vpn.disconnect().await;
             crate::notification::post_distributed_notification(
                 "com.fortivpn-tray.status-changed",
+            );
+            let _ = state.status_tx.send(
+                serde_json::json!({"event":"status","data":{"status":"disconnected","profile":null}}).to_string()
             );
             IpcResponse {
                 ok: true,
@@ -612,9 +653,11 @@ mod tests {
 
     fn make_state() -> AppState {
         let store = make_store();
+        let (status_tx, _) = tokio::sync::broadcast::channel::<String>(16);
         AppState {
             vpn: std::sync::Arc::new(tokio::sync::Mutex::new(crate::vpn::VpnManager::new())),
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+            status_tx,
         }
     }
 
@@ -778,5 +821,16 @@ mod tests {
         let resp = handle_ipc_command(&state, "foobar").await;
         assert!(!resp.ok);
         assert!(resp.message.contains("Unknown command"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_sends_on_status_change() {
+        let state = make_state();
+        let mut rx = state.status_tx.subscribe();
+        let _ = state.status_tx.send(
+            r#"{"event":"status","data":{"status":"disconnected","profile":null}}"#.to_string(),
+        );
+        let msg = rx.recv().await.unwrap();
+        assert!(msg.contains("disconnected"));
     }
 }
