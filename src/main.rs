@@ -1,6 +1,5 @@
 mod installer;
 mod ipc;
-mod keychain;
 mod notification;
 mod profile;
 mod vpn;

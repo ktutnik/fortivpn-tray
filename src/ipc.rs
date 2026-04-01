@@ -154,120 +154,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             }
         }
 
-        "connect" => {
-            let Some(arg) = arg else {
-                return IpcResponse {
-                    ok: false,
-                    message: "Usage: connect <profile-name-or-id>".into(),
-                    data: None,
-                };
-            };
-
-            // Find profile by name (case-insensitive) or ID
-            let profile_id = {
-                let store_lock = state.store.lock().unwrap();
-                find_profile(&store_lock, arg)
-            };
-
-            let Some(profile_id) = profile_id else {
-                return IpcResponse {
-                    ok: false,
-                    message: format!("Profile not found: {arg}"),
-                    data: None,
-                };
-            };
-
-            let profile = {
-                let store = state.store.lock().unwrap();
-                store.get(&profile_id).cloned()
-            };
-
-            let Some(profile) = profile else {
-                return IpcResponse {
-                    ok: false,
-                    message: "Profile not found".into(),
-                    data: None,
-                };
-            };
-
-            // Check password
-            {
-                let vpn = state.vpn.lock().await;
-                if vpn.get_password(&profile.id).is_err() {
-                    return IpcResponse {
-                        ok: false,
-                        message: "No password set for this profile".into(),
-                        data: None,
-                    };
-                }
-            }
-
-            // Connect
-            let result = {
-                let mut vpn = state.vpn.lock().await;
-                vpn.connect(&profile).await
-            };
-
-            match result {
-                Ok(()) => {
-                    // Spawn event monitor for session death
-                    let st = state.clone();
-                    {
-                        let mut vpn = state.vpn.lock().await;
-                        if let Some(ref mut session) = vpn.session {
-                            if let Some(event_rx) = session.take_event_rx() {
-                                let handle = tokio::spawn(async move {
-                                    let mut rx = event_rx;
-                                    let reason = loop {
-                                        match rx.changed().await {
-                                            Ok(()) => {
-                                                let event = rx.borrow().clone();
-                                                if let fortivpn::VpnEvent::Died(ref r) = event {
-                                                    break r.clone();
-                                                }
-                                            }
-                                            Err(_) => break "Connection lost".to_string(),
-                                        }
-                                    };
-                                    log::warn!(target: "vpn", "Session died: {reason}");
-                                    {
-                                        let mut vpn = st.vpn.lock().await;
-                                        vpn.handle_session_death(reason.clone()).await;
-                                    }
-                                    crate::notification::send_notification(
-                                        "FortiVPN Disconnected",
-                                        &reason,
-                                    );
-                                    crate::notification::post_distributed_notification(
-                                        "com.fortivpn-tray.status-changed",
-                                    );
-                                });
-                                vpn.monitor_handle = Some(handle);
-                            }
-                        }
-                    }
-                    log::info!(target: "vpn", "Connected successfully");
-                    crate::notification::post_distributed_notification(
-                        "com.fortivpn-tray.status-changed",
-                    );
-                    IpcResponse {
-                        ok: true,
-                        message: "Connected".into(),
-                        data: None,
-                    }
-                }
-                Err(e) => {
-                    log::error!(target: "vpn", "Connection failed: {e}");
-                    crate::notification::send_notification("FortiVPN Connection Failed", &e);
-                    IpcResponse {
-                        ok: false,
-                        message: format!("Failed: {e}"),
-                        data: None,
-                    }
-                }
-            }
-        }
-
         "connect_with_password" => {
             let Some(args_str) = arg else {
                 return IpcResponse {
@@ -472,7 +358,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             };
             let mut store = state.store.lock().unwrap();
             store.remove(id);
-            let _ = crate::keychain::delete_password(id);
             IpcResponse {
                 ok: true,
                 message: "Deleted".into(),
@@ -480,58 +365,10 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
             }
         }
 
-        "set_password" => {
-            let Some(args_str) = arg else {
-                return IpcResponse {
-                    ok: false,
-                    message: "Usage: set_password <id> <password>".into(),
-                    data: None,
-                };
-            };
-            let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
-            if parts.len() != 2 {
-                return IpcResponse {
-                    ok: false,
-                    message: "Usage: set_password <id> <password>".into(),
-                    data: None,
-                };
-            }
-            match crate::keychain::store_password(parts[0], parts[1]) {
-                Ok(()) => IpcResponse {
-                    ok: true,
-                    message: "Password saved".into(),
-                    data: None,
-                },
-                Err(e) => IpcResponse {
-                    ok: false,
-                    message: format!("Error: {e}"),
-                    data: None,
-                },
-            }
-        }
-
-        "has_password" => {
-            let Some(id) = arg else {
-                return IpcResponse {
-                    ok: false,
-                    message: "Usage: has_password <id>".into(),
-                    data: None,
-                };
-            };
-            // On macOS, Swift app checks Keychain directly to avoid daemon auth prompts.
-            // This fallback is for CLI and Linux/Windows where daemon Keychain access works fine.
-            let has = crate::keychain::get_password(id).is_ok();
-            IpcResponse {
-                ok: true,
-                message: "ok".into(),
-                data: Some(serde_json::json!({"has_password": has})),
-            }
-        }
-
         _ => IpcResponse {
             ok: false,
             message: format!(
-                "Unknown command: {command}. Available: status, list, connect, disconnect, get_profiles, save_profile, delete_profile, set_password, has_password"
+                "Unknown command: {command}. Available: status, list, connect_with_password, disconnect, get_profiles, save_profile, delete_profile"
             ),
             data: None,
         },
@@ -885,30 +722,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ipc_connect_missing_arg() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "connect").await;
-        assert!(!resp.ok);
-        assert!(resp.message.contains("Usage"));
-    }
-
-    #[tokio::test]
-    async fn test_ipc_connect_profile_not_found() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "connect nonexistent").await;
-        assert!(!resp.ok);
-        assert!(resp.message.contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_ipc_connect_no_password() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "connect Office").await;
-        assert!(!resp.ok);
-        assert!(resp.message.contains("No password"));
-    }
-
-    #[tokio::test]
     async fn test_ipc_connect_with_password_missing_arg() {
         let state = make_state();
         let resp = handle_ipc_command(&state, "connect_with_password").await;
@@ -965,26 +778,5 @@ mod tests {
         let resp = handle_ipc_command(&state, "foobar").await;
         assert!(!resp.ok);
         assert!(resp.message.contains("Unknown command"));
-    }
-
-    #[tokio::test]
-    async fn test_ipc_set_password_missing_args() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "set_password").await;
-        assert!(!resp.ok);
-    }
-
-    #[tokio::test]
-    async fn test_ipc_set_password_missing_password() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "set_password id-1").await;
-        assert!(!resp.ok);
-    }
-
-    #[tokio::test]
-    async fn test_ipc_has_password_missing_arg() {
-        let state = make_state();
-        let resp = handle_ipc_command(&state, "has_password").await;
-        assert!(!resp.ok);
     }
 }

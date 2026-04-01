@@ -38,13 +38,6 @@ impl VpnManager {
         self.connected_profile_id.as_deref()
     }
 
-    pub fn get_password(&self, profile_id: &str) -> Result<String, String> {
-        if let Some(pw) = self.session_passwords.get(profile_id) {
-            return Ok(pw.clone());
-        }
-        crate::keychain::get_password(profile_id)
-    }
-
     /// Ensure we have a connection to the privileged helper daemon.
     fn ensure_helper(&mut self) -> Result<&mut HelperClient, String> {
         // Check if existing connection is still alive by sending a ping
@@ -60,11 +53,6 @@ impl VpnManager {
         let helper = HelperClient::connect().map_err(|e| e.to_string())?;
         self.helper = Some(helper);
         Ok(self.helper.as_mut().unwrap())
-    }
-
-    pub async fn connect(&mut self, profile: &VpnProfile) -> Result<(), String> {
-        let password = self.get_password(&profile.id)?;
-        self.connect_with_password(profile, &password).await
     }
 
     pub async fn connect_with_password(
@@ -342,35 +330,6 @@ mod tests {
         manager.disconnect().await.unwrap();
         manager.disconnect().await.unwrap();
         assert_eq!(manager.status, VpnStatus::Disconnected);
-    }
-
-    // -- Session password tests --
-
-    #[test]
-    fn test_get_password_from_session_map() {
-        let mut manager = VpnManager::new();
-        manager
-            .session_passwords
-            .insert("profile-1".to_string(), "secret123".to_string());
-        assert_eq!(manager.get_password("profile-1").unwrap(), "secret123");
-    }
-
-    #[test]
-    fn test_get_password_session_map_takes_priority() {
-        let mut manager = VpnManager::new();
-        // Session password should be returned even if keychain might have a different one
-        manager
-            .session_passwords
-            .insert("profile-1".to_string(), "session-pw".to_string());
-        let result = manager.get_password("profile-1").unwrap();
-        assert_eq!(result, "session-pw");
-    }
-
-    #[test]
-    fn test_get_password_no_session_no_keychain() {
-        let manager = VpnManager::new();
-        // No session password, keychain will fail for non-existent profile
-        assert!(manager.get_password("nonexistent-id").is_err());
     }
 
     #[tokio::test]
