@@ -929,6 +929,8 @@ name = "fortivpn-cli"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "keyring",
+ "rpassword",
  "serde_json",
 ]
 
@@ -939,7 +941,6 @@ dependencies = [
  "dirs",
  "env_logger",
  "fortivpn",
- "keyring",
  "log",
  "notify-rust",
  "oslog",
@@ -964,7 +965,9 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "image",
+ "keyring",
  "muda",
+ "notify-rust",
  "serde",
  "serde_json",
  "tao",
@@ -2790,6 +2793,16 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rpassword"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffc936cf8a7ea60c58f030fd36a612a48f440610214dc54bc36431f9ea0c3efb"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

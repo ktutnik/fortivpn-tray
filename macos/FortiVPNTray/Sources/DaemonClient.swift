@@ -70,10 +70,6 @@ class DaemonClient {
         return profiles
     }
 
-    func connectVPN(name: String) -> IpcResponse? {
-        send(command: "connect \(name)")
-    }
-
     func disconnectVPN() -> IpcResponse? {
         send(command: "disconnect")
     }
@@ -92,16 +88,6 @@ class DaemonClient {
 
     func deleteProfile(id: String) -> IpcResponse? {
         send(command: "delete_profile \(id)")
-    }
-
-    func setPassword(id: String, password: String) -> IpcResponse? {
-        send(command: "set_password \(id) \(password)")
-    }
-
-    func hasPassword(id: String) -> Bool {
-        guard let resp = send(command: "has_password \(id)"), resp.ok, let data = resp.data else { return false }
-        if case .object(let dict) = data, case .bool(let v) = dict["has_password"] { return v }
-        return false
     }
 
     func connectWithPassword(name: String, password: String) -> IpcResponse? {
