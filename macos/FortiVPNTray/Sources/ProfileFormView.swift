@@ -1,3 +1,4 @@
+import Security
 import SwiftUI
 
 struct ProfileFormView: View {
@@ -75,14 +76,13 @@ struct ProfileFormView: View {
                         prompt: Text(isEditing ? "Leave empty to keep current" : "Enter password"))
                     Button("Save Password") {
                         guard !password.isEmpty, let id = profile?.id else { return }
-                        let resp = state.client.setPassword(id: id, password: password)
-                        if resp?.ok == true {
+                        if storeKeychainPassword(profileId: id, password: password) {
                             password = ""
                             statusMessage = "Password saved"
                             isError = false
                             state.refresh()
                         } else {
-                            statusMessage = resp?.message ?? "Failed"
+                            statusMessage = "Failed to save password"
                             isError = true
                         }
                     }
@@ -146,7 +146,7 @@ struct ProfileFormView: View {
             if !password.isEmpty {
                 if let data = resp?.data, case .object(let dict) = data,
                    case .string(let savedId) = dict["id"] {
-                    _ = state.client.setPassword(id: savedId, password: password)
+                    _ = storeKeychainPassword(profileId: savedId, password: password)
                     password = ""
                 }
             }
@@ -157,6 +157,23 @@ struct ProfileFormView: View {
             statusMessage = resp?.message ?? "Save failed"
             isError = true
         }
+    }
+
+    private func storeKeychainPassword(profileId: String, password: String) -> Bool {
+        let passwordData = password.data(using: .utf8)!
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "fortivpn-tray",
+            kSecAttrAccount as String: profileId,
+        ]
+        let update: [String: Any] = [kSecValueData as String: passwordData]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var addQuery = query
+            addQuery[kSecValueData as String] = passwordData
+            return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+        }
+        return status == errSecSuccess
     }
 
     private func fetchCertificate() {
