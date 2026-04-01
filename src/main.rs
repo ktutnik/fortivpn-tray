@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 fn init_logger() {
     // macOS: unified logging (Console.app, `log stream`)
-    #[cfg(feature = "macos-logging")]
+    #[cfg(target_os = "macos")]
     {
         oslog::OsLogger::new("com.fortivpn-tray")
             .level_filter(log::LevelFilter::Info)
@@ -19,15 +19,9 @@ fn init_logger() {
     }
 
     // Linux/Windows: env_logger (stderr, RUST_LOG env var)
-    #[cfg(feature = "generic-logging")]
+    #[cfg(not(target_os = "macos"))]
     {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
-
-    // Fallback if no logging feature enabled
-    #[cfg(not(any(feature = "macos-logging", feature = "generic-logging")))]
-    {
-        let _ = log::LevelFilter::Info;
     }
 }
 
