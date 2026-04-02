@@ -1,19 +1,26 @@
 //! First-launch detection and helper daemon installation.
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 const HELPER_SOCKET: &str = "/var/run/fortivpn-helper.sock";
+#[cfg(target_os = "macos")]
 const HELPER_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/fortivpn-helper";
+#[cfg(target_os = "macos")]
 const PLIST_INSTALL_PATH: &str = "/Library/LaunchDaemons/com.fortivpn-tray.helper.plist";
 
 /// Check if the helper daemon is installed and reachable.
+#[cfg(target_os = "macos")]
 pub fn is_helper_installed() -> bool {
     std::os::unix::net::UnixStream::connect(HELPER_SOCKET).is_ok()
         || Path::new(PLIST_INSTALL_PATH).exists()
 }
 
 /// Check if the installed helper needs upgrading.
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub fn needs_upgrade(bundled_version: &str) -> bool {
     match fortivpn::helper::HelperClient::connect() {
@@ -26,6 +33,7 @@ pub fn needs_upgrade(bundled_version: &str) -> bool {
 }
 
 /// Install or upgrade the helper daemon. Prompts for admin password once.
+#[cfg(target_os = "macos")]
 pub fn install_helper() -> Result<(), String> {
     let helper_src = find_bundled_helper()?;
     let plist_src = find_bundled_plist()?;
@@ -68,6 +76,7 @@ pub fn install_helper() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn find_bundled_helper() -> Result<String, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -95,6 +104,7 @@ fn find_bundled_helper() -> Result<String, String> {
     Err("Bundled helper binary not found".to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn find_bundled_plist() -> Result<String, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -114,4 +124,24 @@ fn find_bundled_plist() -> Result<String, String> {
         return Ok(path.to_string_lossy().to_string());
     }
     Err("Bundled plist not found".to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_helper_installed() -> bool {
+    true // No helper on Windows
+}
+
+#[cfg(target_os = "windows")]
+pub fn install_helper() -> Result<(), String> {
+    Ok(()) // No helper needed
+}
+
+#[cfg(target_os = "linux")]
+pub fn is_helper_installed() -> bool {
+    false // TODO
+}
+
+#[cfg(target_os = "linux")]
+pub fn install_helper() -> Result<(), String> {
+    Err("Linux helper installation not yet implemented".to_string())
 }

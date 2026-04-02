@@ -270,6 +270,17 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
 
     #[cfg(target_os = "windows")]
     {
+        let output = Command::new("route")
+            .args(["print", "0.0.0.0"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 && parts[0] == "0.0.0.0" && parts[1] == "0.0.0.0" {
+                return parts[2].parse().ok();
+            }
+        }
         None
     }
 }
@@ -314,9 +325,29 @@ fn configure_dns(tun_name: &str, config: &VpnConfig) -> Result<(), FortiError> {
         }
     }
 
-    let _ = tun_name;
+    #[cfg(target_os = "windows")]
+    {
+        for dns in &config.dns_servers {
+            let _ = Command::new("netsh")
+                .args([
+                    "interface",
+                    "ip",
+                    "set",
+                    "dns",
+                    tun_name,
+                    "static",
+                    &dns.to_string(),
+                ])
+                .output();
+        }
+        return Ok(());
+    }
 
-    Ok(())
+    #[allow(unreachable_code)]
+    {
+        let _ = tun_name;
+        Ok(())
+    }
 }
 
 fn restore_dns(_tun_name: &str) {
@@ -333,6 +364,11 @@ fn restore_dns(_tun_name: &str) {
                 }
                 child.wait_with_output()
             });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // DNS cleaned up when adapter is removed
     }
 }
 
@@ -355,8 +391,15 @@ fn disable_ipv6() -> Vec<String> {
         interfaces
     }
 
-    #[cfg(not(target_os = "macos"))]
-    Vec::new()
+    #[cfg(target_os = "linux")]
+    {
+        Vec::new() // TODO
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Vec::new() // IPv6 disable via netsh is optional for now
+    }
 }
 
 /// Restore IPv6 on previously disabled interfaces.
@@ -368,7 +411,10 @@ fn restore_ipv6(interfaces: &[String]) {
             .output();
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    let _ = interfaces;
+
+    #[cfg(target_os = "windows")]
     let _ = interfaces;
 }
 
