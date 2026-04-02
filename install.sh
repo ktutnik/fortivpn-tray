@@ -103,27 +103,74 @@ DEOF
 
     MINGW*|MSYS*|CYGWIN*)
         # --- Windows (Git Bash / MSYS2) ---
-        echo "[1/2] Building..."
+
+        # Kill running instances
+        echo "[1/4] Stopping running instances..."
+        taskkill //F //IM fortivpn-app.exe 2>/dev/null || true
+        taskkill //F //IM fortivpn-daemon.exe 2>/dev/null || true
+        sleep 1
+
+        echo "[2/4] Building..."
         cargo build --release -p fortivpn-daemon -p fortivpn-app -p fortivpn-cli
 
-        echo "[2/2] Installing..."
+        echo "[3/4] Installing..."
         INSTALL_DIR="${LOCALAPPDATA}/FortiVPN Tray"
         mkdir -p "$INSTALL_DIR"
 
         cp target/release/fortivpn-daemon.exe "$INSTALL_DIR/"
         cp target/release/fortivpn-app.exe "$INSTALL_DIR/"
         cp target/release/fortivpn.exe "$INSTALL_DIR/"
+        cp icons/icon.ico "$INSTALL_DIR/"
         cp icons/icon.png "$INSTALL_DIR/"
         cp icons/vpn-connected.png "$INSTALL_DIR/"
         cp icons/vpn-disconnected.png "$INSTALL_DIR/"
 
+        # Create Start Menu shortcut with icon
+        echo "[4/4] Creating shortcuts..."
+        START_MENU_DIR="${APPDATA}/Microsoft/Windows/Start Menu/Programs"
+        STARTUP_DIR="${APPDATA}/Microsoft/Windows/Start Menu/Programs/Startup"
+        mkdir -p "$START_MENU_DIR" "$STARTUP_DIR"
+
+        # Windows shortcuts (.lnk) require PowerShell
+        INSTALL_DIR_WIN=$(cygpath -w "$INSTALL_DIR")
+        powershell.exe -NoProfile -Command "
+            \$ws = New-Object -ComObject WScript.Shell;
+            \$s = \$ws.CreateShortcut('$(cygpath -w "$START_MENU_DIR")\FortiVPN Tray.lnk');
+            \$s.TargetPath = '${INSTALL_DIR_WIN}\fortivpn-app.exe';
+            \$s.WorkingDirectory = '${INSTALL_DIR_WIN}';
+            \$s.IconLocation = '${INSTALL_DIR_WIN}\icon.ico,0';
+            \$s.Description = 'FortiGate SSL-VPN Client';
+            \$s.Save();
+            \$s = \$ws.CreateShortcut('$(cygpath -w "$STARTUP_DIR")\FortiVPN Tray.lnk');
+            \$s.TargetPath = '${INSTALL_DIR_WIN}\fortivpn-app.exe';
+            \$s.WorkingDirectory = '${INSTALL_DIR_WIN}';
+            \$s.IconLocation = '${INSTALL_DIR_WIN}\icon.ico,0';
+            \$s.Description = 'FortiGate SSL-VPN Client';
+            \$s.Save();
+        "
+
+        # Also create Desktop shortcut
+        DESKTOP_DIR="${USERPROFILE}/Desktop"
+        if [ -d "$DESKTOP_DIR" ]; then
+            powershell.exe -NoProfile -Command "
+                \$ws = New-Object -ComObject WScript.Shell;
+                \$s = \$ws.CreateShortcut('$(cygpath -w "$DESKTOP_DIR")\FortiVPN Tray.lnk');
+                \$s.TargetPath = '${INSTALL_DIR_WIN}\fortivpn-app.exe';
+                \$s.WorkingDirectory = '${INSTALL_DIR_WIN}';
+                \$s.IconLocation = '${INSTALL_DIR_WIN}\icon.ico,0';
+                \$s.Description = 'FortiGate SSL-VPN Client';
+                \$s.Save();
+            "
+        fi
+
         echo ""
-        echo "✓ Installed to ${INSTALL_DIR}/"
+        echo "Installed to: ${INSTALL_DIR}/"
+        echo "Shortcuts:    Start Menu + Desktop + Autostart"
         echo ""
-        echo "Start: \"${INSTALL_DIR}/fortivpn-app.exe\""
-        echo ""
-        echo "Autostart: create shortcut in"
-        echo "  %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+
+        # Launch the app
+        echo "Launching FortiVPN Tray..."
+        start "" "$(cygpath -w "$INSTALL_DIR/fortivpn-app.exe")"
         ;;
 
     *)
