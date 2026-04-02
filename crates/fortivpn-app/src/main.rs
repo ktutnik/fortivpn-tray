@@ -1,3 +1,6 @@
+// Suppress console window on Windows
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod ipc_client;
 mod keychain;
 mod notification;
@@ -33,6 +36,24 @@ fn main() {
 
         // Store AsyncApp for opening windows from menu events
         *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
+
+        // Create a hidden window to keep GPUI alive on Windows
+        // (GPUI exits when the last window closes, but we need the tray to stay active)
+        #[cfg(target_os = "windows")]
+        {
+            let _ = cx.open_window(
+                gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                        gpui::point(px(0.), px(0.)),
+                        gpui::size(px(1.), px(1.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_window, cx| cx.new(|_| HiddenView),
+            );
+        }
 
         // Hide from Dock (macOS)
         #[cfg(target_os = "macos")]
@@ -194,6 +215,21 @@ fn open_settings_window() {
                 settings::open_settings(cx);
             });
         }
+    }
+}
+
+/// Hidden view to keep GPUI event loop alive on Windows
+#[cfg(target_os = "windows")]
+struct HiddenView;
+
+#[cfg(target_os = "windows")]
+impl gpui::Render for HiddenView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
     }
 }
 
