@@ -10,6 +10,9 @@ use std::sync::Mutex;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+
 // TrayIcon is !Sync, but we only access it from the main thread or under a lock
 struct TrayHolder(TrayIcon);
 unsafe impl Send for TrayHolder {}
@@ -84,8 +87,8 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(_) => {
-                        // Any status event — rebuild menu and update icon
-                        refresh_tray();
+                        // Dispatch to main thread (macOS requires UI on main thread)
+                        dispatch_to_main(refresh_tray);
                     }
                     Err(_) => break, // Connection lost
                 }
@@ -96,6 +99,34 @@ fn subscribe_loop() {
     }
 }
 
+/// Dispatch a function to the main thread (macOS GCD)
+#[cfg(target_os = "macos")]
+fn dispatch_to_main(f: fn()) {
+    extern "C" {
+        fn dispatch_async_f(
+            queue: *const c_void,
+            context: *mut c_void,
+            work: extern "C" fn(*mut c_void),
+        );
+        static _dispatch_main_q: c_void;
+    }
+
+    extern "C" fn trampoline(ctx: *mut c_void) {
+        let f: fn() = unsafe { std::mem::transmute(ctx) };
+        f();
+    }
+
+    unsafe {
+        let main_q = &raw const _dispatch_main_q;
+        dispatch_async_f(main_q, f as *mut c_void, trampoline);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dispatch_to_main(f: fn()) {
+    f();
+}
+
 /// Rebuild tray menu and update icon based on current daemon status
 fn refresh_tray() {
     let status = ipc_client::get_status();
@@ -104,16 +135,16 @@ fn refresh_tray() {
         .map(|s| s.status == "connected")
         .unwrap_or(false);
 
-    // Update icon
     let icon_bytes = if is_connected {
         include_bytes!("../../../icons/vpn-connected.png").as_slice()
     } else {
         include_bytes!("../../../icons/vpn-disconnected.png").as_slice()
     };
+
     if let Ok(guard) = TRAY.lock() {
         if let Some(holder) = guard.as_ref() {
             if let Ok(icon) = load_icon(icon_bytes) {
-                let _ = holder.0.set_icon(Some(icon));
+                let _ = holder.0.set_icon_with_as_template(Some(icon), true);
             }
             let menu = build_tray_menu();
             holder.0.set_menu(Some(Box::new(menu)));
