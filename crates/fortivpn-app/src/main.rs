@@ -33,6 +33,7 @@ fn main() {
 
         // Store AsyncApp for opening windows from menu events
         *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
+
         // Hide from Dock (macOS)
         #[cfg(target_os = "macos")]
         {
@@ -174,13 +175,8 @@ fn handle_menu_event(id: &str) {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
     } else if id == "settings" {
-        if let Ok(guard) = GPUI_APP.lock() {
-            if let Some(holder) = guard.as_ref() {
-                let _ = holder.0.update(|cx| {
-                    settings::open_settings(cx);
-                });
-            }
-        }
+        // Dispatch to next run loop iteration to avoid reentrant GPUI calls
+        dispatch_to_main(open_settings_window);
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
             if s.status == "connected" {
@@ -188,6 +184,16 @@ fn handle_menu_event(id: &str) {
             }
         }
         std::process::exit(0);
+    }
+}
+
+fn open_settings_window() {
+    if let Ok(guard) = GPUI_APP.lock() {
+        if let Some(holder) = guard.as_ref() {
+            let _ = holder.0.update(|cx| {
+                settings::open_settings(cx);
+            });
+        }
     }
 }
 
