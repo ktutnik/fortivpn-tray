@@ -17,6 +17,16 @@ fn main() {
     let app = gpui::Application::new();
 
     app.run(|cx: &mut gpui::App| {
+        // Hide from Dock — tray-only app
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                let ns_app = NSApplication::sharedApplication(mtm);
+                ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
+        }
+
         // Build tray icon
         let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
             .expect("load tray icon");
