@@ -181,6 +181,32 @@ fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> 
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        let ip_action = match action {
+            "add" => "add",
+            "delete" => "del",
+            _ => action,
+        };
+        let mut args = vec!["route", ip_action, dest];
+        if !gateway.is_empty() {
+            args.push("via");
+            args.push(gateway);
+        }
+        let output = Command::new("ip")
+            .args(&args)
+            .output()
+            .map_err(|e| FortiError::RoutingError(format!("ip route {ip_action}: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !(action == "delete" && stderr.contains("No such process")) {
+                return Err(FortiError::RoutingError(format!(
+                    "ip route {ip_action} {dest}: {stderr}"
+                )));
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         let action_upper = action.to_uppercase();
@@ -223,6 +249,23 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
             .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_gateway_output(&stdout)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Format: "default via 192.168.1.1 dev eth0 ..."
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
+                return parts[2].parse().ok();
+            }
+        }
+        None
     }
 
     #[cfg(target_os = "windows")]

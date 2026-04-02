@@ -5,6 +5,11 @@ fn main() {
     // Use a separate target directory to avoid deadlocking on the cargo file lock
     // (the outer cargo holds the lock on target/, so nested cargo must use a different dir).
     let target = std::env::var("TARGET").unwrap();
+
+    // Helper is Unix-only (uses launchd, Unix sockets, SCM_RIGHTS).
+    if target.contains("windows") {
+        return;
+    }
     let profile = std::env::var("PROFILE").unwrap();
     let profile_flag = if profile == "release" {
         "--release"

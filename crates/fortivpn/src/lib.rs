@@ -1,3 +1,4 @@
+#[cfg(unix)]
 pub mod async_tun;
 pub mod auth;
 pub mod bridge;
@@ -88,6 +89,7 @@ pub struct VpnSession {
 
 impl VpnSession {
     /// Establish a full VPN connection: auth → tunnel → PPP → tun → routes.
+    #[cfg(unix)]
     pub async fn connect(
         host: &str,
         port: u16,
