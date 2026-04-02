@@ -10,10 +10,7 @@ use std::sync::Mutex;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-#[cfg(target_os = "macos")]
-use std::ffi::c_void;
-
-// TrayIcon is !Sync, but we only access it from the main thread or under a lock
+// TrayIcon is !Sync, but we only access it from the main thread
 struct TrayHolder(TrayIcon);
 unsafe impl Send for TrayHolder {}
 unsafe impl Sync for TrayHolder {}
@@ -24,62 +21,48 @@ fn main() {
     // Ensure daemon is running
     ensure_daemon();
 
-    // Hide from Dock (macOS)
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-        if let Some(mtm) = objc2::MainThreadMarker::new() {
-            let ns_app = NSApplication::sharedApplication(mtm);
-            ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            ns_app.finishLaunching();
+    let app = gpui::Application::new();
+
+    app.run(|_cx: &mut gpui::App| {
+        // Hide from Dock (macOS)
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                let ns_app = NSApplication::sharedApplication(mtm);
+                ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
         }
-    }
 
-    // Build tray icon
-    let icon =
-        load_icon(include_bytes!("../../../icons/vpn-disconnected.png")).expect("load tray icon");
-    let menu = build_tray_menu();
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_icon(icon)
-        .with_icon_as_template(true)
-        .with_tooltip("FortiVPN Tray")
-        .build()
-        .expect("Failed to build tray icon");
+        // Build tray icon
+        let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
+            .expect("load tray icon");
+        let menu = build_tray_menu();
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon(icon)
+            .with_icon_as_template(true)
+            .with_tooltip("FortiVPN Tray")
+            .build()
+            .expect("Failed to build tray icon");
 
-    *TRAY.lock().unwrap() = Some(TrayHolder(tray));
+        *TRAY.lock().unwrap() = Some(TrayHolder(tray));
 
-    // Set menu event handler
-    MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-        let id = event.id().as_ref().to_string();
-        handle_menu_event(&id);
-    }));
+        // Bridge muda menu events — set_event_handler fires on the main thread
+        // within GPUI's NSApplication::run(), so we can handle events directly
+        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
+            let id = event.id().as_ref().to_string();
+            handle_menu_event(&id);
+        }));
 
-    // Subscribe to daemon status events in background thread
-    std::thread::spawn(|| {
-        subscribe_loop();
+        // Subscribe to daemon status events in background thread
+        std::thread::spawn(|| {
+            subscribe_loop();
+        });
     });
-
-    // Run the macOS event loop (required for tray icon + menu events)
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSApplication;
-        if let Some(mtm) = objc2::MainThreadMarker::new() {
-            let ns_app = NSApplication::sharedApplication(mtm);
-            ns_app.run();
-        }
-    }
-
-    // On Linux/Windows, use a simple blocking loop
-    #[cfg(not(target_os = "macos"))]
-    {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        }
-    }
 }
 
-/// Subscribe to daemon status events and update tray on changes
+/// Subscribe to daemon status events and refresh tray on changes
 fn subscribe_loop() {
     loop {
         if let Some(reader) = ipc_client::subscribe() {
@@ -87,14 +70,13 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(_) => {
-                        // Dispatch to main thread (macOS requires UI on main thread)
+                        // dispatch_to_main ensures UI updates happen on the main thread
                         dispatch_to_main(refresh_tray);
                     }
-                    Err(_) => break, // Connection lost
+                    Err(_) => break,
                 }
             }
         }
-        // Reconnect after 3 seconds
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
@@ -102,6 +84,7 @@ fn subscribe_loop() {
 /// Dispatch a function to the main thread (macOS GCD)
 #[cfg(target_os = "macos")]
 fn dispatch_to_main(f: fn()) {
+    use std::ffi::c_void;
     extern "C" {
         fn dispatch_async_f(
             queue: *const c_void,
@@ -182,6 +165,7 @@ fn handle_menu_event(id: &str) {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
     } else if id == "settings" {
+        // TODO: Open GPUI settings window via _cx.open_window()
         notification::show("Settings", "Use CLI for now: fortivpn list / set-password");
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
