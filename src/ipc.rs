@@ -1,9 +1,10 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::net::TcpListener;
+
+const DAEMON_ADDR: &str = "127.0.0.1:9847";
 
 use crate::profile::ProfileStore;
 use crate::vpn::{VpnManager, VpnStatus};
@@ -16,13 +17,6 @@ pub struct AppState {
     pub vpn: VpnState,
     pub store: StoreState,
     pub status_tx: tokio::sync::broadcast::Sender<String>,
-}
-
-pub fn socket_path() -> PathBuf {
-    dirs::config_dir()
-        .expect("Could not find config directory")
-        .join("fortivpn-tray")
-        .join("ipc.sock")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,26 +42,15 @@ pub struct IpcResponse {
 }
 
 pub async fn start_ipc_server(state: AppState) {
-    let sock = socket_path();
-    log::info!(target: "ipc", "Socket path: {}", sock.display());
-
-    // Remove stale socket
-    let _ = std::fs::remove_file(&sock);
-
-    let listener = match UnixListener::bind(&sock) {
+    let listener = match TcpListener::bind(DAEMON_ADDR).await {
         Ok(l) => l,
         Err(e) => {
-            log::error!(target: "ipc", "Failed to bind socket: {e}");
+            log::error!(target: "ipc", "Failed to bind TCP listener: {e}");
             return;
         }
     };
 
-    // Make socket accessible
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&sock, PermissionsExt::from_mode(0o600));
-    }
+    log::info!(target: "ipc", "Listening on {}", DAEMON_ADDR);
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -103,7 +86,7 @@ pub async fn start_ipc_server(state: AppState) {
 
 async fn handle_subscribe(
     state: &AppState,
-    writer: &mut tokio::io::BufWriter<tokio::net::unix::OwnedWriteHalf>,
+    writer: &mut tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>,
 ) {
     use tokio::io::AsyncWriteExt;
     let mut rx = state.status_tx.subscribe();
@@ -270,9 +253,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                                         "FortiVPN Disconnected",
                                         &reason,
                                     );
-                                    crate::notification::post_distributed_notification(
-                                        "com.fortivpn-tray.status-changed",
-                                    );
                                     let _ = st.status_tx.send(
                                         serde_json::json!({"event":"status","data":{"status":format!("error: {reason}"),"profile":null}}).to_string()
                                     );
@@ -282,9 +262,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                         }
                     }
                     log::info!(target: "vpn", "Connected successfully");
-                    crate::notification::post_distributed_notification(
-                        "com.fortivpn-tray.status-changed",
-                    );
                     let _ = state.status_tx.send(
                         serde_json::json!({"event":"status","data":{"status":"connected","profile":profile.name}}).to_string()
                     );
@@ -312,9 +289,6 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
         "disconnect" => {
             let mut vpn = state.vpn.lock().await;
             let _ = vpn.disconnect().await;
-            crate::notification::post_distributed_notification(
-                "com.fortivpn-tray.status-changed",
-            );
             let _ = state.status_tx.send(
                 serde_json::json!({"event":"status","data":{"status":"disconnected","profile":null}}).to_string()
             );
@@ -437,11 +411,6 @@ fn find_profile(store: &ProfileStore, query: &str) -> Option<String> {
         .map(|p| p.id.clone())
 }
 
-#[allow(dead_code)]
-pub fn cleanup_socket() {
-    let _ = std::fs::remove_file(socket_path());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,10 +487,8 @@ mod tests {
     }
 
     #[test]
-    fn test_socket_path_contains_ipc_sock() {
-        let path = socket_path();
-        assert!(path.to_string_lossy().contains("ipc.sock"));
-        assert!(path.to_string_lossy().contains("fortivpn-tray"));
+    fn test_daemon_addr() {
+        assert_eq!(DAEMON_ADDR, "127.0.0.1:9847");
     }
 
     #[test]
@@ -558,12 +525,6 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("connected"));
         assert!(json.contains("Office VPN"));
-    }
-
-    #[test]
-    fn test_cleanup_socket_no_panic() {
-        // Should not panic even if socket doesn't exist
-        cleanup_socket();
     }
 
     #[test]
