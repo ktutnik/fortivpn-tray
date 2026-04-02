@@ -10,7 +10,7 @@ use crate::keychain;
 
 /// Open the settings window from the GPUI app context
 pub fn open_settings(cx: &mut App) {
-    let bounds = Bounds::centered(None, size(px(640.), px(480.)), cx);
+    let bounds = Bounds::centered(None, size(px(640.), px(600.)), cx);
     let _ = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -386,8 +386,8 @@ impl SettingsView {
             .h_full()
             .flex()
             .flex_col()
-            .p_4()
-            .gap_3()
+            .p_3()
+            .gap_2()
             .overflow_scroll()
             // Title
             .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(
