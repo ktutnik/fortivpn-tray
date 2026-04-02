@@ -1,8 +1,7 @@
-#[allow(dead_code)]
 mod ipc_client;
-#[allow(dead_code)]
 mod keychain;
 mod notification;
+mod settings;
 
 use std::process::Command;
 use std::sync::Mutex;
@@ -16,6 +15,11 @@ unsafe impl Send for TrayHolder {}
 unsafe impl Sync for TrayHolder {}
 
 static TRAY: Mutex<Option<TrayHolder>> = Mutex::new(None);
+struct AppHolder(gpui::AsyncApp);
+unsafe impl Send for AppHolder {}
+unsafe impl Sync for AppHolder {}
+
+static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 
 fn main() {
     // Ensure daemon is running
@@ -23,7 +27,12 @@ fn main() {
 
     let app = gpui::Application::new();
 
-    app.run(|_cx: &mut gpui::App| {
+    app.run(|cx: &mut gpui::App| {
+        // Initialize gpui-component (theme, input, button, etc.)
+        gpui_component::init(cx);
+
+        // Store AsyncApp for opening windows from menu events
+        *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
         // Hide from Dock (macOS)
         #[cfg(target_os = "macos")]
         {
@@ -165,8 +174,13 @@ fn handle_menu_event(id: &str) {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
     } else if id == "settings" {
-        // TODO: Open GPUI settings window via _cx.open_window()
-        notification::show("Settings", "Use CLI for now: fortivpn list / set-password");
+        if let Ok(guard) = GPUI_APP.lock() {
+            if let Some(holder) = guard.as_ref() {
+                let _ = holder.0.update(|cx| {
+                    settings::open_settings(cx);
+                });
+            }
+        }
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
             if s.status == "connected" {
