@@ -15,18 +15,10 @@ OS="$(uname -s)"
 case "$OS" in
     Darwin)
         # --- macOS ---
-        if ! command -v swift &>/dev/null; then
-            echo "Error: Swift not found. Run: xcode-select --install"
-            exit 1
-        fi
-
-        echo "[1/4] Building Rust daemon + helper..."
+        echo "[1/3] Building Rust workspace..."
         cargo build --release --workspace
 
-        echo "[2/4] Building Swift app..."
-        (cd macos/FortiVPNTray && swift build -c release 2>&1)
-
-        echo "[3/4] Creating app bundle..."
+        echo "[2/3] Creating app bundle..."
         APP_NAME="FortiVPN Tray"
         BUNDLE_DIR="target/release/bundle/${APP_NAME}.app"
         CONTENTS="${BUNDLE_DIR}/Contents"
@@ -35,7 +27,7 @@ case "$OS" in
         mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
 
         cp target/release/fortivpn-daemon "${CONTENTS}/MacOS/"
-        cp "macos/FortiVPNTray/.build/release/FortiVPNTray" "${CONTENTS}/MacOS/FortiVPN Tray"
+        cp target/release/fortivpn-app "${CONTENTS}/MacOS/FortiVPN Tray"
         cp target/release/fortivpn-helper "${CONTENTS}/Resources/"
         cp resources/Info.plist "${CONTENTS}/"
         cp icons/icon.icns "${CONTENTS}/Resources/"
@@ -44,7 +36,7 @@ case "$OS" in
         cp resources/com.fortivpn-tray.helper.plist "${CONTENTS}/Resources/"
         /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable 'FortiVPN Tray'" "${CONTENTS}/Info.plist"
 
-        echo "[4/4] Installing..."
+        echo "[3/3] Installing..."
         pkill -9 -f "FortiVPN Tray" 2>/dev/null || true
         pkill -9 -f "fortivpn-daemon" 2>/dev/null || true
         sleep 1
@@ -77,7 +69,7 @@ case "$OS" in
     Linux)
         # --- Linux ---
         echo "[1/2] Building..."
-        cargo build --release -p fortivpn-daemon -p fortivpn-ui -p fortivpn-helper -p fortivpn-cli
+        cargo build --release -p fortivpn-daemon -p fortivpn-app -p fortivpn-helper -p fortivpn-cli
 
         echo "[2/2] Installing..."
         INSTALL_DIR="${HOME}/.local/bin"
@@ -86,7 +78,7 @@ case "$OS" in
         mkdir -p "$INSTALL_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 
         cp target/release/fortivpn-daemon "$INSTALL_DIR/"
-        cp target/release/fortivpn-ui "$INSTALL_DIR/"
+        cp target/release/fortivpn-app "$INSTALL_DIR/"
         cp target/release/fortivpn "$INSTALL_DIR/"
         cp target/release/fortivpn-helper "$INSTALL_DIR/"
         cp icons/icon.png "$ICON_DIR/fortivpn-tray.png"
@@ -95,7 +87,7 @@ case "$OS" in
 [Desktop Entry]
 Name=FortiVPN Tray
 Comment=FortiGate SSL-VPN client
-Exec=${INSTALL_DIR}/fortivpn-ui
+Exec=${INSTALL_DIR}/fortivpn-app
 Icon=fortivpn-tray
 Type=Application
 Categories=Network;VPN;
@@ -105,21 +97,21 @@ DEOF
         echo ""
         echo "✓ Installed to ${INSTALL_DIR}/"
         echo ""
-        echo "Start:     fortivpn-daemon & fortivpn-ui"
+        echo "Start:     fortivpn-daemon & fortivpn-app"
         echo "Autostart: cp ${DESKTOP_DIR}/fortivpn-tray.desktop ~/.config/autostart/"
         ;;
 
     MINGW*|MSYS*|CYGWIN*)
         # --- Windows (Git Bash / MSYS2) ---
         echo "[1/2] Building..."
-        cargo build --release -p fortivpn-daemon -p fortivpn-ui -p fortivpn-cli
+        cargo build --release -p fortivpn-daemon -p fortivpn-app -p fortivpn-cli
 
         echo "[2/2] Installing..."
         INSTALL_DIR="${LOCALAPPDATA}/FortiVPN Tray"
         mkdir -p "$INSTALL_DIR"
 
         cp target/release/fortivpn-daemon.exe "$INSTALL_DIR/"
-        cp target/release/fortivpn-ui.exe "$INSTALL_DIR/"
+        cp target/release/fortivpn-app.exe "$INSTALL_DIR/"
         cp target/release/fortivpn.exe "$INSTALL_DIR/"
         cp icons/icon.png "$INSTALL_DIR/"
         cp icons/vpn-connected.png "$INSTALL_DIR/"
@@ -128,7 +120,7 @@ DEOF
         echo ""
         echo "✓ Installed to ${INSTALL_DIR}/"
         echo ""
-        echo "Start: \"${INSTALL_DIR}/fortivpn-ui.exe\""
+        echo "Start: \"${INSTALL_DIR}/fortivpn-app.exe\""
         echo ""
         echo "Autostart: create shortcut in"
         echo "  %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"

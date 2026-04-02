@@ -45,12 +45,12 @@ case "$OS" in
         INSTALL_DIR="${HOME}/.local/bin"
 
         echo "Stopping processes..."
-        pkill -9 -f "fortivpn-ui" 2>/dev/null || true
+        pkill -9 -f "fortivpn-app" 2>/dev/null || true
         pkill -9 -f "fortivpn-daemon" 2>/dev/null || true
 
         echo "Removing binaries..."
         rm -f "$INSTALL_DIR/fortivpn-daemon"
-        rm -f "$INSTALL_DIR/fortivpn-ui"
+        rm -f "$INSTALL_DIR/fortivpn-app"
         rm -f "$INSTALL_DIR/fortivpn"
         rm -f "$INSTALL_DIR/fortivpn-helper"
 
@@ -76,7 +76,7 @@ case "$OS" in
         INSTALL_DIR="${LOCALAPPDATA}/FortiVPN Tray"
 
         echo "Stopping processes..."
-        taskkill /F /IM fortivpn-ui.exe 2>/dev/null || true
+        taskkill /F /IM fortivpn-app.exe 2>/dev/null || true
         taskkill /F /IM fortivpn-daemon.exe 2>/dev/null || true
 
         echo "Removing installation..."

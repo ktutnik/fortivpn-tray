@@ -9,17 +9,13 @@ rm -rf "${BUNDLE_DIR}"
 mkdir -p "${CONTENTS}/MacOS"
 mkdir -p "${CONTENTS}/Resources"
 
-# Build Rust daemon + helper + CLI
-echo "Building Rust daemon..."
+# Build all Rust binaries
+echo "Building..."
 cargo build --release --workspace
-
-# Build Swift app
-echo "Building Swift app..."
-cd macos/FortiVPNTray && swift build -c release 2>&1 && cd ../..
 
 # Copy binaries
 cp target/release/fortivpn-daemon "${CONTENTS}/MacOS/"
-cp "macos/FortiVPNTray/.build/release/FortiVPNTray" "${CONTENTS}/MacOS/FortiVPN Tray"
+cp target/release/fortivpn-app "${CONTENTS}/MacOS/FortiVPN Tray"
 cp target/release/fortivpn-helper "${CONTENTS}/Resources/" 2>/dev/null || true
 
 # Copy resources
@@ -29,7 +25,7 @@ cp icons/vpn-connected.png "${CONTENTS}/Resources/"
 cp icons/vpn-disconnected.png "${CONTENTS}/Resources/"
 cp resources/com.fortivpn-tray.helper.plist "${CONTENTS}/Resources/"
 
-# Update Info.plist to point to the Swift binary as the main executable
+# Update Info.plist executable name
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable 'FortiVPN Tray'" "${CONTENTS}/Info.plist"
 
 echo "Bundle created at: ${BUNDLE_DIR}"
