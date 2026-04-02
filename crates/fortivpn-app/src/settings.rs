@@ -3,6 +3,7 @@ use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::ActiveTheme;
+use gpui_component::Root;
 
 use crate::ipc_client::{self, VpnProfile};
 use crate::keychain;
@@ -22,7 +23,12 @@ pub fn open_settings(cx: &mut App) {
             is_resizable: false,
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| SettingsView::new(window, cx)),
+        |window, cx| {
+            // gpui-component requires Root as the window's root view
+            let settings_view = cx.new(|cx| SettingsView::new(window, cx));
+            let view: AnyView = settings_view.into();
+            cx.new(|cx| Root::new(view, window, cx))
+        },
     );
 }
 
