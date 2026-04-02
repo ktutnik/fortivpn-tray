@@ -6,8 +6,9 @@ fn main() {
     // (the outer cargo holds the lock on target/, so nested cargo must use a different dir).
     let target = std::env::var("TARGET").unwrap();
 
-    // Helper is Unix-only (uses launchd, Unix sockets, SCM_RIGHTS).
+    // On Windows, embed the manifest that requests admin elevation (for TUN + routes)
     if target.contains("windows") {
+        embed_windows_manifest();
         return;
     }
     let profile = std::env::var("PROFILE").unwrap();
@@ -53,4 +54,35 @@ fn main() {
     std::fs::copy(&src, &dst).unwrap_or_else(|e| {
         panic!("Failed to copy helper from {src} to {dst}: {e}");
     });
+}
+
+fn embed_windows_manifest() {
+    println!("cargo:rerun-if-changed=daemon.manifest");
+
+    // Write a .rc file that includes the manifest
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let rc_path = format!("{out_dir}/daemon.rc");
+    let manifest_src = std::path::Path::new("daemon.manifest")
+        .canonicalize()
+        .unwrap();
+    let manifest_escaped = manifest_src.to_str().unwrap().replace('\\', "\\\\");
+    std::fs::write(&rc_path, format!("1 24 \"{manifest_escaped}\"\n")).unwrap();
+
+    // Use the `embed_resource` approach: compile .rc to .res and link
+    let res_path = format!("{out_dir}/daemon.res");
+    let status = Command::new("rc.exe")
+        .args(["/nologo", "/fo", &res_path, &rc_path])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("cargo:rustc-link-arg-bin=fortivpn-daemon={res_path}");
+        }
+        _ => {
+            // rc.exe not available (not in MSVC dev environment) — skip manifest embedding
+            // The daemon will work but won't auto-request elevation
+            eprintln!("Warning: rc.exe not found — daemon will not auto-request admin privileges");
+            eprintln!("Run the daemon as Administrator manually for VPN connections");
+        }
+    }
 }

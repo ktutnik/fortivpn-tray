@@ -27,5 +27,8 @@ sha2 = "0.10"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell"] }
+
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 notify-rust = "4"

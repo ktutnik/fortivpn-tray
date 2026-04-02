@@ -113,7 +113,7 @@ DEOF
         echo "[2/4] Building..."
         cargo build --release -p fortivpn-daemon -p fortivpn-app -p fortivpn-cli
 
-        echo "[3/4] Installing..."
+        echo "[3/5] Installing..."
         INSTALL_DIR="${LOCALAPPDATA}/FortiVPN Tray"
         mkdir -p "$INSTALL_DIR"
 
@@ -125,8 +125,49 @@ DEOF
         cp icons/vpn-connected.png "$INSTALL_DIR/"
         cp icons/vpn-disconnected.png "$INSTALL_DIR/"
 
+        # Download WinTun driver if not already present
+        echo "[4/5] Checking WinTun driver..."
+        if [ ! -f "$INSTALL_DIR/wintun.dll" ]; then
+            echo "  Downloading wintun.dll..."
+            WINTUN_URL="https://www.wintun.net/builds/wintun-0.14.1.zip"
+            WINTUN_ZIP="$INSTALL_DIR/wintun.zip"
+            curl -sL "$WINTUN_URL" -o "$WINTUN_ZIP" 2>/dev/null || \
+                powershell.exe -NoProfile -Command "Invoke-WebRequest -Uri '$WINTUN_URL' -OutFile '$(cygpath -w "$WINTUN_ZIP")'" 2>/dev/null
+            if [ -f "$WINTUN_ZIP" ]; then
+                # Extract the correct architecture DLL
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                    x86_64|AMD64) WINTUN_ARCH="amd64" ;;
+                    aarch64|ARM64) WINTUN_ARCH="arm64" ;;
+                    *) WINTUN_ARCH="amd64" ;;
+                esac
+                powershell.exe -NoProfile -Command "
+                    \$zip = [System.IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$WINTUN_ZIP")');
+                    \$entry = \$zip.Entries | Where-Object { \$_.FullName -like \"*wintun/bin/${WINTUN_ARCH}/wintun.dll\" };
+                    if (\$entry) {
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile(\$entry, '$(cygpath -w "$INSTALL_DIR/wintun.dll")', \$true);
+                    }
+                    \$zip.Dispose();
+                "
+                rm -f "$WINTUN_ZIP"
+                if [ -f "$INSTALL_DIR/wintun.dll" ]; then
+                    echo "  wintun.dll installed"
+                else
+                    echo "  WARNING: Could not extract wintun.dll — VPN connections will fail"
+                    echo "  Download manually from https://www.wintun.net/ and place wintun.dll in:"
+                    echo "    $INSTALL_DIR/"
+                fi
+            else
+                echo "  WARNING: Could not download WinTun — VPN connections will fail"
+                echo "  Download manually from https://www.wintun.net/ and place wintun.dll in:"
+                echo "    $INSTALL_DIR/"
+            fi
+        else
+            echo "  wintun.dll already present"
+        fi
+
         # Create Start Menu shortcut with icon
-        echo "[4/4] Creating shortcuts..."
+        echo "[5/5] Creating shortcuts..."
         START_MENU_DIR="${APPDATA}/Microsoft/Windows/Start Menu/Programs"
         STARTUP_DIR="${APPDATA}/Microsoft/Windows/Start Menu/Programs/Startup"
         mkdir -p "$START_MENU_DIR" "$STARTUP_DIR"

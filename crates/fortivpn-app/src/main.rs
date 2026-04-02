@@ -306,17 +306,35 @@ fn ensure_daemon() {
 
             let daemon = dir.join(daemon_name);
             if daemon.exists() {
-                let mut cmd = Command::new(&daemon);
-
-                // On Windows, prevent the daemon from showing a console window
-                #[cfg(windows)]
+                #[cfg(unix)]
                 {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                    let _ = Command::new(&daemon).spawn();
                 }
 
-                let _ = cmd.spawn();
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                // On Windows, use ShellExecute with "runas" to trigger UAC elevation
+                // The daemon needs admin for TUN creation and route management
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStrExt;
+                    let path: Vec<u16> = daemon
+                        .as_os_str()
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+                    unsafe {
+                        windows_sys::Win32::UI::Shell::ShellExecuteW(
+                            std::ptr::null_mut(),
+                            verb.as_ptr(),
+                            path.as_ptr(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            0, // SW_HIDE
+                        );
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
     }
