@@ -13,51 +13,54 @@ fn main() {
     // Ensure daemon is running
     ensure_daemon();
 
-    // Initialize GPUI app (needed for event loop)
-    let app = gpui::Application::new();
-
-    app.run(|cx: &mut gpui::App| {
-        // Hide from Dock — tray-only app
-        #[cfg(target_os = "macos")]
-        {
-            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-            if let Some(mtm) = objc2::MainThreadMarker::new() {
-                let ns_app = NSApplication::sharedApplication(mtm);
-                ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            }
+    // Hide from Dock (macOS)
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            // Ensure the app is properly initialized
+            ns_app.finishLaunching();
         }
+    }
 
-        // Build tray icon
-        let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
-            .expect("load tray icon");
-        let menu = build_tray_menu();
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_icon(icon)
-            .with_icon_as_template(true)
-            .with_tooltip("FortiVPN Tray")
-            .build()
-            .expect("Failed to build tray icon");
+    // Build tray icon
+    let icon =
+        load_icon(include_bytes!("../../../icons/vpn-disconnected.png")).expect("load tray icon");
+    let menu = build_tray_menu();
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_icon(icon)
+        .with_icon_as_template(true)
+        .with_tooltip("FortiVPN Tray")
+        .build()
+        .expect("Failed to build tray icon");
+    std::mem::forget(tray);
 
-        // Keep tray icon alive for the lifetime of the app
-        // (dropping it removes the icon from the menu bar)
-        std::mem::forget(tray);
+    // Set menu event handler
+    MenuEvent::set_event_handler(Some(|event: MenuEvent| {
+        let id = event.id().as_ref().to_string();
+        handle_menu_event(&id);
+    }));
 
-        // Menu event handling
-        let menu_rx = MenuEvent::receiver();
+    // Run the macOS event loop (required for tray icon + menu events)
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSApplication;
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            ns_app.run();
+        }
+    }
 
-        // Use GPUI's timer to poll menu events
-        cx.spawn(async move |cx| loop {
-            if let Ok(event) = menu_rx.try_recv() {
-                let id = event.id().as_ref().to_string();
-                handle_menu_event(&id);
-            }
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(100))
-                .await;
-        })
-        .detach();
-    });
+    // On Linux/Windows, use a simple blocking loop
+    #[cfg(not(target_os = "macos"))]
+    {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
 }
 
 fn handle_menu_event(id: &str) {
@@ -91,7 +94,7 @@ fn handle_menu_event(id: &str) {
         notification::show("FortiVPN Disconnected", "VPN connection closed");
     } else if id == "settings" {
         // TODO: Open GPUI settings window
-        eprintln!("Settings window not yet implemented");
+        notification::show("Settings", "Use CLI for now: fortivpn list / set-password");
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
             if s.status == "connected" {
