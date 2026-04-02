@@ -1,4 +1,3 @@
-#[cfg(unix)]
 pub mod async_tun;
 pub mod auth;
 pub mod bridge;

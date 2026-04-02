@@ -222,77 +222,145 @@ mod platform {
     }
 }
 
-// ── Windows stub ─────────────────────────────────────────────────────────────
+// ── Windows implementation ───────────────────────────────────────────────────
+//
+// On Windows there is no separate helper daemon. TUN devices are created
+// directly via `tun2`, routes via `route.exe`, DNS via `netsh`.
 
 #[cfg(windows)]
 mod platform {
     use std::net::Ipv4Addr;
+    use std::process::Command;
 
-    use crate::{FortiError, VpnConfig};
+    use tun2::AsyncDevice;
 
-    /// Stub helper client for Windows (not yet implemented).
-    pub struct HelperClient;
+    use crate::{tun, FortiError, VpnConfig};
+
+    /// Windows helper client — creates TUN directly (no privilege daemon).
+    pub struct HelperClient {
+        /// Name of the active TUN interface (for DNS restore).
+        tun_name: Option<String>,
+    }
 
     impl HelperClient {
+        /// No daemon to connect to on Windows; just construct the client.
         pub fn connect() -> Result<Self, FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            Ok(Self { tun_name: None })
         }
 
         pub fn version(&mut self) -> Result<String, FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            Ok(env!("CARGO_PKG_VERSION").to_string())
         }
 
+        /// Create a TUN device via `tun2`. Returns `(AsyncDevice, tun_name)`.
         pub fn create_tun(
             &mut self,
-            _ip: Ipv4Addr,
-            _peer_ip: Ipv4Addr,
-            _mtu: u16,
-        ) -> Result<(i32, String), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            ip: Ipv4Addr,
+            peer_ip: Ipv4Addr,
+            mtu: u16,
+        ) -> Result<(AsyncDevice, String), FortiError> {
+            let dev = tun::create_tun(ip, peer_ip, mtu)?;
+            let name = tun::device_name(&dev);
+            self.tun_name = Some(name.clone());
+            Ok((dev, name))
         }
 
-        pub fn add_route(&mut self, _dest: &str, _gateway: &str) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+        /// Add a route via `route.exe ADD`.
+        pub fn add_route(&mut self, dest: &str, gateway: &str) -> Result<(), FortiError> {
+            let output = Command::new("route")
+                .args(["ADD", dest, "MASK", "255.255.255.255", gateway])
+                .output()
+                .map_err(|e| FortiError::RoutingError(format!("route ADD: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(FortiError::RoutingError(format!(
+                    "route ADD {dest}: {stderr}"
+                )));
+            }
+            Ok(())
         }
 
+        /// No-op on Windows — tun2 cleans up on drop.
         pub fn destroy_tun(&mut self) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            self.tun_name = None;
+            Ok(())
         }
 
-        pub fn delete_route(&mut self, _dest: &str) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+        /// Delete a route via `route.exe DELETE`.
+        pub fn delete_route(&mut self, dest: &str) -> Result<(), FortiError> {
+            let output = Command::new("route")
+                .args(["DELETE", dest])
+                .output()
+                .map_err(|e| FortiError::RoutingError(format!("route DELETE: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(FortiError::RoutingError(format!(
+                    "route DELETE {dest}: {stderr}"
+                )));
+            }
+            Ok(())
         }
 
-        pub fn configure_dns(&mut self, _config: &VpnConfig) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+        /// Configure DNS servers via `netsh`.
+        pub fn configure_dns(&mut self, config: &VpnConfig) -> Result<(), FortiError> {
+            let iface = self.tun_name.as_deref().unwrap_or("FortiVPN");
+
+            for (i, server) in config.dns_servers.iter().enumerate() {
+                let iface_owned = iface.to_string();
+                let server_str = server.to_string();
+                let index_str = (i + 1).to_string();
+
+                let mut cmd = Command::new("netsh");
+                if i == 0 {
+                    cmd.args(["interface", "ip", "set", "dns"])
+                        .arg(format!("name={iface_owned}"))
+                        .arg("static")
+                        .arg(&server_str);
+                } else {
+                    cmd.args(["interface", "ip", "add", "dns"])
+                        .arg(format!("name={iface_owned}"))
+                        .arg(&server_str)
+                        .arg(format!("index={index_str}"));
+                }
+
+                let output = cmd
+                    .output()
+                    .map_err(|e| FortiError::TunDeviceError(format!("netsh dns: {e}")))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(FortiError::TunDeviceError(format!(
+                        "netsh dns configure: {stderr}"
+                    )));
+                }
+            }
+            Ok(())
         }
 
+        /// Restore DNS to DHCP via `netsh`.
         pub fn restore_dns(&mut self) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            let iface = self.tun_name.as_deref().unwrap_or("FortiVPN");
+
+            let output = Command::new("netsh")
+                .args(["interface", "ip", "set", "dns"])
+                .arg(format!("name={iface}"))
+                .arg("dhcp")
+                .output()
+                .map_err(|e| FortiError::TunDeviceError(format!("netsh dns restore: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(FortiError::TunDeviceError(format!(
+                    "netsh dns restore: {stderr}"
+                )));
+            }
+            Ok(())
         }
 
+        /// No-op ping — no daemon to check on Windows.
         pub fn ping(&mut self) -> Result<(), FortiError> {
-            Err(FortiError::TunDeviceError(
-                "Windows helper not yet implemented".into(),
-            ))
+            Ok(())
         }
 
+        /// No-op shutdown — no daemon to stop on Windows.
         pub fn shutdown(&mut self) {}
     }
 }

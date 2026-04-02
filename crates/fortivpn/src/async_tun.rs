@@ -118,3 +118,57 @@ mod platform {
 
 #[cfg(unix)]
 pub use platform::AsyncTunFd;
+
+// ── Windows implementation ──────────────────────────────────────────────────
+
+#[cfg(windows)]
+mod platform {
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tun2::AsyncDevice;
+
+    /// An async tun device backed by a `tun2::AsyncDevice`.
+    pub struct AsyncTunFd {
+        inner: AsyncDevice,
+    }
+
+    impl AsyncTunFd {
+        /// Create from a `tun2::AsyncDevice` (takes ownership).
+        pub fn from_device(dev: AsyncDevice) -> io::Result<Self> {
+            Ok(Self { inner: dev })
+        }
+    }
+
+    impl AsyncRead for AsyncTunFd {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for AsyncTunFd {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+}
+
+#[cfg(windows)]
+pub use platform::AsyncTunFd;
