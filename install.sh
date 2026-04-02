@@ -142,6 +142,7 @@ DEOF
                     *) WINTUN_ARCH="amd64" ;;
                 esac
                 powershell.exe -NoProfile -Command "
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem;
                     \$zip = [System.IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$WINTUN_ZIP")');
                     \$entry = \$zip.Entries | Where-Object { \$_.FullName -like \"*wintun/bin/${WINTUN_ARCH}/wintun.dll\" };
                     if (\$entry) {

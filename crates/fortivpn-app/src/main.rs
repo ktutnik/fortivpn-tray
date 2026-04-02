@@ -6,6 +6,7 @@ mod keychain;
 mod notification;
 mod settings;
 
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::Mutex;
 
