@@ -14,6 +14,8 @@
 //!   Parent -> Helper: {"cmd":"cleanup","routes":[...],"gateway_ip":"1.2.3.4","orig_gateway":"192.168.1.1"}
 //!   (Helper cleans up routes/DNS and exits)
 
+mod commands;
+
 #[cfg(unix)]
 mod unix_main;
 
