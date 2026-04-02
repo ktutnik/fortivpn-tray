@@ -1,11 +1,12 @@
 //! IPC client for communicating with the fortivpn-daemon.
-//! Connects to the Unix domain socket and sends JSON commands.
+//! Connects via TCP to the daemon on localhost.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::net::TcpStream;
 
 use serde::{Deserialize, Serialize};
+
+const DAEMON_ADDR: &str = "127.0.0.1:9847";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcResponse {
@@ -30,16 +31,9 @@ pub struct StatusResponse {
     pub profile: Option<String>,
 }
 
-fn socket_path() -> PathBuf {
-    dirs::config_dir()
-        .expect("Could not find config directory")
-        .join("fortivpn-tray")
-        .join("ipc.sock")
-}
-
 /// Send a command to the daemon and return the response.
 pub fn send_command(command: &str) -> Option<IpcResponse> {
-    let stream = UnixStream::connect(socket_path()).ok()?;
+    let stream = TcpStream::connect(DAEMON_ADDR).ok()?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .ok()?;
@@ -97,8 +91,8 @@ pub fn delete_profile(id: &str) -> Option<IpcResponse> {
 }
 
 /// Subscribe to daemon status events. Returns a persistent BufReader for reading events.
-pub fn subscribe() -> Option<BufReader<UnixStream>> {
-    let stream = UnixStream::connect(socket_path()).ok()?;
+pub fn subscribe() -> Option<BufReader<TcpStream>> {
+    let stream = TcpStream::connect(DAEMON_ADDR).ok()?;
     stream.set_read_timeout(None).ok()?; // No timeout for persistent connection
     let mut writer = stream.try_clone().ok()?;
     writeln!(writer, "subscribe").ok()?;

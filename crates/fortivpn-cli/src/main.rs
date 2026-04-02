@@ -1,15 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::net::TcpStream;
 
-fn socket_path() -> PathBuf {
-    dirs::config_dir()
-        .expect("Could not find config directory")
-        .join("fortivpn-tray")
-        .join("ipc.sock")
-}
+const DAEMON_ADDR: &str = "127.0.0.1:9847";
 
-fn send_command(stream: &mut UnixStream, command: &str) -> String {
+fn send_command(stream: &mut TcpStream, command: &str) -> String {
     writeln!(stream, "{command}").expect("Failed to send command");
     stream.flush().expect("Failed to flush");
 
@@ -21,9 +15,8 @@ fn send_command(stream: &mut UnixStream, command: &str) -> String {
     line
 }
 
-fn connect_stream() -> UnixStream {
-    let sock = socket_path();
-    match UnixStream::connect(&sock) {
+fn connect_stream() -> TcpStream {
+    match TcpStream::connect(DAEMON_ADDR) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("Cannot connect to fortivpn-tray. Is the tray app running?");
