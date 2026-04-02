@@ -1,41 +1,27 @@
 import Foundation
 
 class DaemonClient {
-    private let socketPath: String
-
-    init() {
-        // Use Application Support (same as Rust's dirs::config_dir() on macOS)
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        socketPath = appSupport.appendingPathComponent("fortivpn-tray/ipc.sock").path
-    }
-
     /// Send a command and return the raw JSON response
     func send(command: String) -> IpcResponse? {
-        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { Darwin.close(fd) }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            let bytes = Array(socketPath.utf8)
-            for i in 0..<min(bytes.count, buf.count - 1) {
-                buf[i] = bytes[i]
-            }
-            buf[min(bytes.count, buf.count - 1)] = 0
-        }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(9847).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
-        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        let len = socklen_t(MemoryLayout<sockaddr_in>.size)
         let connected = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(fd, $0, len)
             }
         }
         guard connected == 0 else { return nil }
-
-        // Set read timeout (30 seconds — VPN handshake can take a while)
-        var timeout = timeval(tv_sec: 30, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
         // Send
         let msg = command + "\n"

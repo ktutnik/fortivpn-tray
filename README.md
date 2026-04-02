@@ -173,7 +173,7 @@ rm -rf "$APPDATA/fortivpn-tray"  # optional: removes profiles
 
 ### CLI
 
-The CLI controls the VPN through the daemon via a Unix socket. This is what makes FortiVPN Tray automatable — AI coding assistants, scripts, and cron jobs can manage VPN connections programmatically.
+The CLI controls the VPN through the daemon via TCP. This is what makes FortiVPN Tray automatable — AI coding assistants, scripts, and cron jobs can manage VPN connections programmatically.
 
 ```bash
 fortivpn status              # Show connection status
@@ -211,7 +211,7 @@ Since passwords are stored in the OS keychain, the CLI connects without any inte
 |------|----------|
 | Profiles | `~/Library/Application Support/fortivpn-tray/profiles.json` |
 | Passwords | macOS Keychain (service: `fortivpn-tray`) |
-| IPC Socket | `~/Library/Application Support/fortivpn-tray/ipc.sock` |
+| IPC | TCP `localhost:9847` |
 
 ## Design
 
@@ -228,7 +228,7 @@ graph TD
         alert["NSAlert (password prompt)"]
     end
 
-    swift -- "Unix Socket IPC<br/>(JSON commands)" --> daemon
+    swift -- "TCP IPC<br/>(JSON commands)" --> daemon
 
     subgraph daemon["Rust Daemon (headless)"]
         ipc["IPC Server"]
@@ -244,7 +244,7 @@ graph TD
         cliprog["fortivpn"]
     end
 
-    cli -- "Unix Socket IPC" --> daemon
+    cli -- "TCP IPC" --> daemon
 
     vpnmgr --> crate
 
@@ -284,13 +284,13 @@ The user-facing macOS app. Provides the tray icon, menu, settings window, and pa
 |------|-------------|
 | [`App.swift`](macos/FortiVPNTray/Sources/App.swift) | Entry point. Sets `NSApp.setActivationPolicy(.accessory)` to hide from Dock. |
 | [`AppDelegate.swift`](macos/FortiVPNTray/Sources/AppDelegate.swift) | Tray icon (`NSStatusItem`), menu building (`NSMenuDelegate`), connect/disconnect actions, password prompt (`NSAlert`), auto-reconnect logic, macOS Keychain access. |
-| [`DaemonClient.swift`](macos/FortiVPNTray/Sources/DaemonClient.swift) | Unix socket client. Opens a connection to the daemon, sends a text command, reads JSON response. Each command opens a fresh socket (stateless). |
+| [`DaemonClient.swift`](macos/FortiVPNTray/Sources/DaemonClient.swift) | TCP client. Opens a connection to the daemon at `127.0.0.1:9847`, sends a text command, reads JSON response. Each command opens a fresh connection (stateless). |
 | [`VPNState.swift`](macos/FortiVPNTray/Sources/VPNState.swift) | `ObservableObject` holding profiles and connection status. `refresh()` calls `DaemonClient` to fetch latest state. Checks Keychain for password status. |
 | [`SettingsView.swift`](macos/FortiVPNTray/Sources/SettingsView.swift) | SwiftUI `NavigationSplitView` — sidebar with profile list, detail with edit form. |
 | [`ProfileFormView.swift`](macos/FortiVPNTray/Sources/ProfileFormView.swift) | SwiftUI form for creating/editing profiles (name, host, port, username, cert fingerprint, password). |
 | [`Models.swift`](macos/FortiVPNTray/Sources/Models.swift) | `Codable` structs matching the daemon's JSON: `VpnProfile`, `IpcResponse`, `StatusResponse`. |
 
-**Key interaction**: When you click "Connect" in the tray menu, the Swift app reads the password from macOS Keychain (Swift has UI access, so no auth dialogs), then sends `connect_with_password {"name":"MIMS SG","password":"..."}` to the daemon via the Unix socket. The daemon handles the actual VPN connection.
+**Key interaction**: When you click "Connect" in the tray menu, the Swift app reads the password from macOS Keychain (Swift has UI access, so no auth dialogs), then sends `connect_with_password {"name":"MIMS SG","password":"..."}` to the daemon via TCP. The daemon handles the actual VPN connection.
 
 **Status sync**: The daemon posts `CFNotificationCenter` distributed notifications when VPN state changes. The Swift app listens via `DistributedNotificationCenter.default().addObserver(...)` and instantly updates the tray icon — zero polling.
 
@@ -301,7 +301,7 @@ A headless background process running a tokio async runtime. Owns all VPN logic,
 | File | What it does |
 |------|-------------|
 | [`main.rs`](src/main.rs) | Entry point. Initializes logging (`os_log` on macOS, `env_logger` on Linux/Windows), loads profiles, checks helper installation, starts IPC server. |
-| [`ipc.rs`](src/ipc.rs) | Unix socket server at `~/Library/Application Support/fortivpn-tray/ipc.sock`. Accepts connections, reads newline-delimited text commands, dispatches to handlers, returns JSON. Supports: `status`, `list`, `connect`, `disconnect`, `connect_with_password`, `get_profiles`, `save_profile`, `delete_profile`, `set_password`, `has_password`. |
+| [`ipc.rs`](src/ipc.rs) | TCP server on `127.0.0.1:9847`. Accepts connections, reads newline-delimited text commands, dispatches to handlers, returns JSON. Supports: `status`, `list`, `connect`, `disconnect`, `connect_with_password`, `get_profiles`, `save_profile`, `delete_profile`, `set_password`, `has_password`. |
 | [`vpn.rs`](src/vpn.rs) | `VpnManager` — state machine tracking `Disconnected/Connecting/Connected/Disconnecting/Error`. Manages helper client, session passwords, and the connection lifecycle. |
 | [`profile.rs`](src/profile.rs) | `ProfileStore` — loads/saves `profiles.json`. CRUD operations with auto-save. |
 | [`keychain.rs`](src/keychain.rs) | Thin wrapper around `keyring` crate for password storage (macOS Keychain / Windows Credential Manager / Linux Secret Service). |
@@ -353,12 +353,12 @@ An alternative UI for Windows and Linux using Rust + `tray-icon`/`muda` + `wry` 
 | File | What it does |
 |------|-------------|
 | [`main.rs`](crates/fortivpn-ui/src/main.rs) | `tao` event loop + tray icon + on-demand WebView for settings. |
-| [`ipc_client.rs`](crates/fortivpn-ui/src/ipc_client.rs) | Unix socket IPC client (Rust equivalent of Swift's `DaemonClient`). |
+| [`ipc_client.rs`](crates/fortivpn-ui/src/ipc_client.rs) | TCP IPC client (Rust equivalent of Swift's `DaemonClient`). |
 | [`resources/settings.html`](crates/fortivpn-ui/resources/settings.html) | HTML/CSS/JS settings page with sidebar + form. |
 
 ### Key Design Decisions
 
-- **Swift + Rust split** — Swift owns all macOS UI. Rust owns VPN logic and runs cross-platform. They communicate via Unix socket IPC. This gives native macOS UX (Dock behavior, Spaces, dark mode) with zero battery drain.
+- **Swift + Rust split** — Swift owns all macOS UI. Rust owns VPN logic and runs cross-platform. They communicate via TCP IPC. This gives native macOS UX (Dock behavior, Spaces, dark mode) with zero battery drain.
 
 - **Native Rust protocol** — TLS, HTTP auth, PPP framing, IP bridging all implemented from scratch. No dependency on `openfortivpn` or any external binary.
 
@@ -379,7 +379,7 @@ fortivpn-tray/
 │   │   ├── App.swift             # Entry point
 │   │   ├── AppDelegate.swift     # Tray, menu, connect/disconnect, keychain
 │   │   ├── VPNState.swift        # Observable state
-│   │   ├── DaemonClient.swift    # IPC client (Unix socket)
+│   │   ├── DaemonClient.swift    # IPC client (TCP)
 │   │   ├── SettingsView.swift    # SwiftUI settings
 │   │   ├── ProfileFormView.swift # Profile edit form
 │   │   └── Models.swift          # JSON models

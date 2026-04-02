@@ -7,11 +7,11 @@ A macOS system tray app for connecting to FortiGate SSL-VPN. Uses a **Swift UI +
 ## Stack
 
 - **macOS UI**: Swift (NSStatusItem, NSMenu, SwiftUI settings, NSAlert password prompt)
-- **Daemon**: Rust + tokio (headless, IPC over Unix socket)
+- **Daemon**: Rust + tokio (headless, IPC over TCP)
 - **VPN protocol**: Native Rust (TLS auth, PPP session, async IP bridge, TUN device)
 - **Password storage**: macOS Keychain via Swift `Security.framework` (UI) and `keyring` crate (daemon/CLI)
 - **Privilege separation**: Helper daemon runs as root via `launchd` socket activation
-- **IPC**: Unix domain socket at `~/Library/Application Support/fortivpn-tray/ipc.sock`
+- **IPC**: TCP `127.0.0.1:9847`
 - **Cross-platform UI**: Rust + `tray-icon`/`muda` + `wry` for Windows/Linux (in `crates/fortivpn-ui/`)
 - **Logging**: macOS unified logging (`os_log`) / `env_logger` on Linux/Windows
 
@@ -24,7 +24,7 @@ fortivpn-tray/
 │       ├── App.swift             # Entry point, accessory activation policy
 │       ├── AppDelegate.swift     # Tray, menu, connect/disconnect, keychain, auto-reconnect
 │       ├── VPNState.swift        # Observable state, keychain password check
-│       ├── DaemonClient.swift    # IPC client (Unix socket, JSON)
+│       ├── DaemonClient.swift    # IPC client (TCP, JSON)
 │       ├── SettingsView.swift    # SwiftUI NavigationSplitView
 │       ├── ProfileFormView.swift # Profile edit form
 │       └── Models.swift          # Codable structs (VpnProfile, IpcResponse)
@@ -55,7 +55,7 @@ fortivpn-tray/
 
 - **Profiles**: `~/Library/Application Support/fortivpn-tray/profiles.json`
 - **Passwords**: macOS Keychain (service: `fortivpn-tray`, account: profile UUID)
-- **IPC socket**: `~/Library/Application Support/fortivpn-tray/ipc.sock`
+- **IPC**: TCP `127.0.0.1:9847`
 - **Helper socket**: `/var/run/fortivpn-helper.sock`
 
 ## Key Architecture
@@ -64,7 +64,7 @@ fortivpn-tray/
 - **Swift UI app** — owns all macOS UI (tray, menu, settings, password prompt, Keychain access)
 - **Rust daemon** — owns VPN logic, profile storage, IPC server. No UI, no Keychain access on macOS
 
-They communicate via Unix socket IPC (JSON over newline-delimited text). The daemon also posts macOS distributed notifications (`CFNotificationCenter`) on state changes so the Swift app updates instantly without polling.
+They communicate via TCP IPC on `127.0.0.1:9847` (JSON over newline-delimited text). The daemon also posts macOS distributed notifications (`CFNotificationCenter`) on state changes so the Swift app updates instantly without polling.
 
 ### VPN Connection Flow
 1. User clicks profile in tray menu (or CLI `fortivpn connect <name>`)

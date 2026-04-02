@@ -928,7 +928,6 @@ dependencies = [
 name = "fortivpn-cli"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "keyring",
  "rpassword",
  "serde_json",
@@ -963,7 +962,6 @@ dependencies = [
 name = "fortivpn-ui"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "image",
  "keyring",
  "muda",
