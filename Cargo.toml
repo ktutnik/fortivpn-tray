@@ -1,39 +1,9 @@
 [workspace]
-members = [".", "crates/fortivpn", "crates/fortivpn-helper", "crates/fortivpn-cli", "crates/fortivpn-app"]
-
-[package]
-name = "fortivpn-daemon"
-version = "0.1.0"
-description = "A headless daemon for FortiGate SSL-VPN (IPC over Unix socket)"
-authors = ["you"]
-edition = "2021"
-
-[build-dependencies]
-
-[dependencies]
-fortivpn = { path = "crates/fortivpn" }
-
-# Logging
-log = "0.4"
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Data & serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-dirs = "6"
-uuid = { version = "1", features = ["v4"] }
-
-# macOS unified logging (Console.app)
-[target.'cfg(target_os = "macos")'.dependencies]
-oslog = "0.2"
-
-# Linux/Windows logging + notifications
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-env_logger = "0.11"
-notify-rust = "4"
-
-[[bin]]
-name = "fortivpn-daemon"
-path = "src/main.rs"
+members = [
+    "crates/fortivpn",
+    "crates/fortivpn-daemon",
+    "crates/fortivpn-helper",
+    "crates/fortivpn-cli",
+    "crates/fortivpn-app",
+]
+resolver = "2"
