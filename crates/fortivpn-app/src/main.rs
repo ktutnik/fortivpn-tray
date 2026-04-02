@@ -5,9 +5,17 @@ mod keychain;
 mod notification;
 
 use std::process::Command;
+use std::sync::Mutex;
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+// TrayIcon is !Sync, but we only access it from the main thread or under a lock
+struct TrayHolder(TrayIcon);
+unsafe impl Send for TrayHolder {}
+unsafe impl Sync for TrayHolder {}
+
+static TRAY: Mutex<Option<TrayHolder>> = Mutex::new(None);
 
 fn main() {
     // Ensure daemon is running
@@ -20,7 +28,6 @@ fn main() {
         if let Some(mtm) = objc2::MainThreadMarker::new() {
             let ns_app = NSApplication::sharedApplication(mtm);
             ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            // Ensure the app is properly initialized
             ns_app.finishLaunching();
         }
     }
@@ -36,13 +43,19 @@ fn main() {
         .with_tooltip("FortiVPN Tray")
         .build()
         .expect("Failed to build tray icon");
-    std::mem::forget(tray);
+
+    *TRAY.lock().unwrap() = Some(TrayHolder(tray));
 
     // Set menu event handler
     MenuEvent::set_event_handler(Some(|event: MenuEvent| {
         let id = event.id().as_ref().to_string();
         handle_menu_event(&id);
     }));
+
+    // Subscribe to daemon status events in background thread
+    std::thread::spawn(|| {
+        subscribe_loop();
+    });
 
     // Run the macOS event loop (required for tray icon + menu events)
     #[cfg(target_os = "macos")]
@@ -59,6 +72,51 @@ fn main() {
     {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+}
+
+/// Subscribe to daemon status events and update tray on changes
+fn subscribe_loop() {
+    loop {
+        if let Some(reader) = ipc_client::subscribe() {
+            use std::io::BufRead;
+            for line in reader.lines() {
+                match line {
+                    Ok(_) => {
+                        // Any status event — rebuild menu and update icon
+                        refresh_tray();
+                    }
+                    Err(_) => break, // Connection lost
+                }
+            }
+        }
+        // Reconnect after 3 seconds
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+/// Rebuild tray menu and update icon based on current daemon status
+fn refresh_tray() {
+    let status = ipc_client::get_status();
+    let is_connected = status
+        .as_ref()
+        .map(|s| s.status == "connected")
+        .unwrap_or(false);
+
+    // Update icon
+    let icon_bytes = if is_connected {
+        include_bytes!("../../../icons/vpn-connected.png").as_slice()
+    } else {
+        include_bytes!("../../../icons/vpn-disconnected.png").as_slice()
+    };
+    if let Ok(guard) = TRAY.lock() {
+        if let Some(holder) = guard.as_ref() {
+            if let Ok(icon) = load_icon(icon_bytes) {
+                let _ = holder.0.set_icon(Some(icon));
+            }
+            let menu = build_tray_menu();
+            holder.0.set_menu(Some(Box::new(menu)));
         }
     }
 }
@@ -93,7 +151,6 @@ fn handle_menu_event(id: &str) {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
     } else if id == "settings" {
-        // TODO: Open GPUI settings window
         notification::show("Settings", "Use CLI for now: fortivpn list / set-password");
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
