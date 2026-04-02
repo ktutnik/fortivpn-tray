@@ -88,7 +88,6 @@ pub struct VpnSession {
 
 impl VpnSession {
     /// Establish a full VPN connection: auth → tunnel → PPP → tun → routes.
-    #[cfg(unix)]
     pub async fn connect(
         host: &str,
         port: u16,
@@ -128,9 +127,23 @@ impl VpnSession {
         };
 
         // Phase 4: Create tun device via privileged helper
-        let (tun_fd, tun_name) = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
-        let tun_dev = async_tun::AsyncTunFd::new(tun_fd)
-            .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
+        // Unix: helper returns raw fd
+        #[cfg(unix)]
+        let (tun_dev, tun_name) = {
+            let (fd, name) = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
+            let dev = async_tun::AsyncTunFd::new(fd)
+                .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
+            (dev, name)
+        };
+
+        // Windows: helper returns AsyncDevice directly
+        #[cfg(windows)]
+        let (tun_dev, tun_name) = {
+            let (dev, name) = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
+            let dev = async_tun::AsyncTunFd::from_device(dev)
+                .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
+            (dev, name)
+        };
 
         // Phase 5: Start bridge (tun ↔ tunnel)
         let shutdown = Arc::new(Notify::new());
