@@ -31,13 +31,17 @@ fn main() {
         let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
             .expect("load tray icon");
         let menu = build_tray_menu();
-        let _tray = TrayIconBuilder::new()
+        let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_icon(icon)
             .with_icon_as_template(true)
             .with_tooltip("FortiVPN Tray")
             .build()
             .expect("Failed to build tray icon");
+
+        // Keep tray icon alive for the lifetime of the app
+        // (dropping it removes the icon from the menu bar)
+        std::mem::forget(tray);
 
         // Menu event handling
         let menu_rx = MenuEvent::receiver();
