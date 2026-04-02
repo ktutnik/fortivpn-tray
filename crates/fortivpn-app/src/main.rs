@@ -41,6 +41,7 @@ fn main() {
         // (GPUI exits when the last window closes, but we need the tray to stay active)
         #[cfg(target_os = "windows")]
         {
+            use gpui::{px, AppContext};
             let _ = cx.open_window(
                 gpui::WindowOptions {
                     show: false,
