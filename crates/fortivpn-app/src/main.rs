@@ -299,9 +299,23 @@ fn ensure_daemon() {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let daemon = dir.join("fortivpn-daemon");
+            #[cfg(unix)]
+            let daemon_name = "fortivpn-daemon";
+            #[cfg(windows)]
+            let daemon_name = "fortivpn-daemon.exe";
+
+            let daemon = dir.join(daemon_name);
             if daemon.exists() {
-                let _ = Command::new(daemon).spawn();
+                let mut cmd = Command::new(&daemon);
+
+                // On Windows, prevent the daemon from showing a console window
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+
+                let _ = cmd.spawn();
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }

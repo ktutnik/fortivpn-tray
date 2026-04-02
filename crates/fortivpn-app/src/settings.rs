@@ -227,43 +227,14 @@ impl SettingsView {
         self.status_message = Some("Fetching certificate...".into());
         cx.notify();
 
-        let addr = format!("{host}:{port}");
-        let out = std::process::Command::new("sh")
-            .args([
-                "-c",
-                &format!(
-                    "echo | openssl s_client -connect {addr} -servername {host} 2>/dev/null | openssl x509 -fingerprint -sha256 -noout 2>/dev/null"
-                ),
-            ])
-            .output();
-
-        match out {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout
-                    .lines()
-                    .find(|l| l.contains("SHA256") || l.contains("sha256"))
-                {
-                    let fp = line
-                        .split('=')
-                        .next_back()
-                        .unwrap_or("")
-                        .trim()
-                        .replace(':', "")
-                        .to_lowercase();
-                    if fp.len() == 64 {
-                        self.cert_input
-                            .update(cx, |s, cx| s.set_value(fp, window, cx));
-                        self.status_message = Some("Certificate fetched".into());
-                    } else {
-                        self.status_message = Some("Could not parse fingerprint".into());
-                    }
-                } else {
-                    self.status_message = Some("Could not extract fingerprint".into());
-                }
+        match fetch_cert_fingerprint(&host, port) {
+            Ok(fp) => {
+                self.cert_input
+                    .update(cx, |s, cx| s.set_value(fp, window, cx));
+                self.status_message = Some("Certificate fetched".into());
             }
             Err(e) => {
-                self.status_message = Some(format!("openssl error: {e}"));
+                self.status_message = Some(e);
             }
         }
         cx.notify();
@@ -463,6 +434,96 @@ impl SettingsView {
                         },
                     ))),
             )
+    }
+}
+
+/// Fetch TLS certificate SHA256 fingerprint using pure Rust (no shell commands)
+fn fetch_cert_fingerprint(host: &str, port: u16) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let addr = format!("{host}:{port}");
+    let tcp = TcpStream::connect(&addr).map_err(|e| format!("Cannot connect to {addr}: {e}"))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
+
+    // Use rustls to do TLS handshake and extract the server certificate
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // Accept any certificate (we want the fingerprint, not to validate it)
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("Invalid hostname: {e}"))?;
+
+    let mut conn = rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+        .map_err(|e| format!("TLS error: {e}"))?;
+
+    let mut tcp_ref = &tcp;
+    let mut sock = rustls::Stream::new(&mut conn, &mut tcp_ref);
+
+    // Trigger the handshake by attempting to write
+    let _ = sock.write_all(b"");
+    let _ = sock.flush();
+    // Read a bit to complete handshake
+    let mut buf = [0u8; 1];
+    let _ = sock.read(&mut buf);
+
+    // Extract peer certificates
+    let certs = conn
+        .peer_certificates()
+        .ok_or("No certificates from server")?;
+    let cert_der = certs.first().ok_or("Empty certificate chain")?;
+
+    // Compute SHA256 fingerprint
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(cert_der.as_ref());
+    let fp = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    Ok(fp)
+}
+
+/// Accepts any TLS certificate (used for fingerprint fetching, not for VPN connections)
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
