@@ -29,6 +29,9 @@ fn init_logger() {
 async fn main() {
     init_logger();
 
+    // Install rustls CryptoProvider (required since multiple providers may be available)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     log::info!(target: "daemon", "FortiVPN daemon starting");
 
     let store = profile::ProfileStore::load();

@@ -10,6 +10,10 @@ edition = "2021"
 [dependencies]
 fortivpn = { path = "../fortivpn" }
 
+# TLS (need to install CryptoProvider at startup)
+rustls = "0.23"
+aws-lc-rs = "1"
+
 # Logging
 log = "0.4"
 
