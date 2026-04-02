@@ -549,13 +549,15 @@ mod tests {
 
     #[test]
     fn test_build_tls_config_without_cert() {
+        // Install crypto provider before building TLS config
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config = build_tls_config("");
-        // Should create a config with standard root certificates
         assert!(std::sync::Arc::strong_count(&config) >= 1);
     }
 
     #[test]
     fn test_build_tls_config_with_pinned_cert() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let config =
             build_tls_config("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
         assert!(std::sync::Arc::strong_count(&config) >= 1);
