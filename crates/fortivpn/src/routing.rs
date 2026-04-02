@@ -229,6 +229,7 @@ fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn parse_gateway_output(stdout: &str) -> Option<Ipv4Addr> {
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -285,6 +286,7 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn build_dns_script(dns_servers: &[Ipv4Addr], search_domain: &Option<String>) -> String {
     let dns_ips: Vec<String> = dns_servers.iter().map(|ip| ip.to_string()).collect();
     let mut script = format!("d.init\nd.add ServerAddresses * {}\n", dns_ips.join(" "));
@@ -419,35 +421,33 @@ fn restore_ipv6(interfaces: &[String]) {
 }
 
 /// Get network interfaces that currently have IPv6 enabled (automatic or manual).
+#[cfg(target_os = "macos")]
 fn get_ipv6_active_interfaces() -> Vec<String> {
     let mut result = Vec::new();
 
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("networksetup")
-            .args(["-listallnetworkservices"])
-            .output();
-        let Ok(output) = output else { return result };
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    let output = Command::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output();
+    let Ok(output) = output else { return result };
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-        for line in stdout.lines() {
-            // Skip the header line and disabled services (prefixed with *)
-            if line.starts_with('*') || line.contains("An asterisk") {
-                continue;
-            }
-            let service = line.trim();
-            if service.is_empty() {
-                continue;
-            }
-            // Check if this service has IPv6 enabled
-            if let Ok(v6_output) = Command::new("networksetup")
-                .args(["-getinfo", service])
-                .output()
-            {
-                let info = String::from_utf8_lossy(&v6_output.stdout);
-                if info.contains("IPv6: Automatic") || info.contains("IPv6: Manual") {
-                    result.push(service.to_string());
-                }
+    for line in stdout.lines() {
+        // Skip the header line and disabled services (prefixed with *)
+        if line.starts_with('*') || line.contains("An asterisk") {
+            continue;
+        }
+        let service = line.trim();
+        if service.is_empty() {
+            continue;
+        }
+        // Check if this service has IPv6 enabled
+        if let Ok(v6_output) = Command::new("networksetup")
+            .args(["-getinfo", service])
+            .output()
+        {
+            let info = String::from_utf8_lossy(&v6_output.stdout);
+            if info.contains("IPv6: Automatic") || info.contains("IPv6: Manual") {
+                result.push(service.to_string());
             }
         }
     }
@@ -509,8 +509,9 @@ mod tests {
         assert!(!rm.full_tunnel);
     }
 
-    // parse_gateway_output tests
+    // parse_gateway_output tests (macOS-only helper)
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_typical() {
         let output = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
         assert_eq!(
@@ -520,23 +521,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_no_gateway() {
         let output = "   route to: default\ndestination: default\n  interface: en0\n";
         assert_eq!(parse_gateway_output(output), None);
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_empty() {
         assert_eq!(parse_gateway_output(""), None);
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_invalid_ip() {
         let output = "    gateway: not-an-ip\n";
         assert_eq!(parse_gateway_output(output), None);
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_extra_whitespace() {
         let output = "    gateway:   10.0.0.1  \n";
         assert_eq!(
@@ -545,8 +550,9 @@ mod tests {
         );
     }
 
-    // build_dns_script tests
+    // build_dns_script tests (macOS-only helper)
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_single_server() {
         let servers = vec![Ipv4Addr::new(8, 8, 8, 8)];
         let script = build_dns_script(&servers, &None);
@@ -557,6 +563,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_multiple_servers() {
         let servers = vec![Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
         let script = build_dns_script(&servers, &None);
@@ -564,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_with_search_domain() {
         let servers = vec![Ipv4Addr::new(10, 0, 0, 1)];
         let domain = Some("corp.example.com".to_string());
@@ -572,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_no_search_domain() {
         let servers = vec![Ipv4Addr::new(10, 0, 0, 1)];
         let script = build_dns_script(&servers, &None);
@@ -632,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_link_address_line() {
         // Some systems output "gateway:" followed by a link address
         let output = "   route to: default\n    gateway: link#5\n  interface: en0\n";
@@ -640,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_multiple_gateways() {
         // Should return the first gateway found
         let output = "    gateway: 10.0.0.1\n    gateway: 10.0.0.2\n";
@@ -650,6 +661,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_empty_servers() {
         let servers: Vec<Ipv4Addr> = vec![];
         let script = build_dns_script(&servers, &None);
@@ -658,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_build_dns_script_with_many_servers() {
         let servers = vec![
             Ipv4Addr::new(8, 8, 8, 8),
