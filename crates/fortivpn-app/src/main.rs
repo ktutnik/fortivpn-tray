@@ -103,8 +103,10 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(_) => {
-                        // dispatch_to_main ensures UI updates happen on the main thread
-                        dispatch_to_main(refresh_tray);
+                        // Only update the icon from the subscribe thread.
+                        // Menu rebuild from background thread breaks event handling on Windows.
+                        // Menu gets rebuilt when user interacts (connect/disconnect handlers).
+                        dispatch_to_main(refresh_icon);
                     }
                     Err(_) => break,
                 }
@@ -146,8 +148,9 @@ fn dispatch_to_main(f: fn()) {
     f();
 }
 
-/// Rebuild tray menu and update icon based on current daemon status
-fn refresh_tray() {
+/// Update only the tray icon based on current status.
+/// Safe to call from any thread — does not touch the menu.
+fn refresh_icon() {
     let status = ipc_client::get_status();
     let is_connected = status
         .as_ref()
@@ -163,8 +166,22 @@ fn refresh_tray() {
     if let Ok(guard) = TRAY.lock() {
         if let Some(holder) = guard.as_ref() {
             if let Ok(icon) = load_icon(icon_bytes) {
+                // macOS: use template icon (adapts to menu bar theme)
+                #[cfg(target_os = "macos")]
                 let _ = holder.0.set_icon_with_as_template(Some(icon), true);
+                // Windows/Linux: use regular icon
+                #[cfg(not(target_os = "macos"))]
+                let _ = holder.0.set_icon(Some(icon));
             }
+        }
+    }
+}
+
+/// Rebuild tray menu AND update icon. Call from main thread only (menu event handlers).
+fn refresh_tray() {
+    refresh_icon();
+    if let Ok(guard) = TRAY.lock() {
+        if let Some(holder) = guard.as_ref() {
             let menu = build_tray_menu();
             holder.0.set_menu(Some(Box::new(menu)));
         }
@@ -187,6 +204,7 @@ fn handle_menu_event(id: &str) {
                         notification::show("Connection Failed", &r.message);
                     }
                 }
+                refresh_tray();
             } else {
                 notification::show(
                     "No Password",
@@ -200,6 +218,7 @@ fn handle_menu_event(id: &str) {
     } else if id.starts_with("disconnect:") {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
+        refresh_tray();
     } else if id == "settings" {
         // Dispatch to next run loop iteration to avoid reentrant GPUI calls
         dispatch_to_main(open_settings_window);
