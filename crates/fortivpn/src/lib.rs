@@ -17,7 +17,8 @@ pub fn silent_cmd(program: &str) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        // CREATE_NO_WINDOW (0x08000000) + DETACHED_PROCESS (0x00000008)
+        cmd.creation_flags(0x08000008);
     }
     cmd
 }

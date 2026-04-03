@@ -8,7 +8,11 @@ mod settings;
 
 #[cfg(unix)]
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// Flag set by subscribe thread when status changes. Picked up by menu handlers.
+static STATUS_CHANGED: AtomicBool = AtomicBool::new(false);
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -103,10 +107,13 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(_) => {
-                        // Only update the icon from the subscribe thread.
-                        // Menu rebuild from background thread breaks event handling on Windows.
-                        // Menu gets rebuilt when user interacts (connect/disconnect handlers).
+                        // macOS: dispatch icon update to main thread via GCD
+                        #[cfg(target_os = "macos")]
                         dispatch_to_main(refresh_icon);
+                        // Windows/Linux: set flag, don't touch tray from background thread
+                        // (causes crashes when network state changes during VPN connect)
+                        #[cfg(not(target_os = "macos"))]
+                        STATUS_CHANGED.store(true, Ordering::Relaxed);
                     }
                     Err(_) => break,
                 }
@@ -140,13 +147,7 @@ fn dispatch_to_main(f: fn()) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn dispatch_to_main(f: fn()) {
-    // On Windows/Linux, tray-icon handles cross-thread updates internally
-    // (set_menu/set_icon post messages to the tray window).
-    // Calling directly avoids blocking GPUI's event loop with TCP calls.
-    f();
-}
+// On Windows/Linux, subscribe thread uses STATUS_CHANGED atomic flag instead of dispatch_to_main
 
 /// Update only the tray icon based on current status.
 /// Safe to call from any thread — does not touch the menu.
@@ -189,6 +190,11 @@ fn refresh_tray() {
 }
 
 fn handle_menu_event(id: &str) {
+    // Check if subscribe thread flagged a status change — refresh tray on main thread
+    if STATUS_CHANGED.swap(false, Ordering::Relaxed) {
+        refresh_tray();
+    }
+
     if let Some(profile_name) = id.strip_prefix("connect:") {
         let profiles = ipc_client::get_profiles();
         if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
