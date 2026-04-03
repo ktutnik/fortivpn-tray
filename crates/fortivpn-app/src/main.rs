@@ -8,11 +8,7 @@ mod settings;
 
 #[cfg(unix)]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-
-/// Flag set by subscribe thread when status changes. Picked up by menu handlers.
-static STATUS_CHANGED: AtomicBool = AtomicBool::new(false);
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -32,6 +28,10 @@ static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 fn main() {
     // Ensure daemon is running
     ensure_daemon();
+
+    // Initialize Windows dispatch mechanism before GPUI takes over the event loop
+    #[cfg(target_os = "windows")]
+    win_dispatch::init();
 
     let app = gpui::Application::new();
 
@@ -85,8 +85,7 @@ fn main() {
 
         *TRAY.lock().unwrap() = Some(TrayHolder(tray));
 
-        // Bridge muda menu events — set_event_handler fires on the main thread
-        // within GPUI's NSApplication::run(), so we can handle events directly
+        // Bridge muda menu events
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
             let id = event.id().as_ref().to_string();
             handle_menu_event(&id);
@@ -107,13 +106,8 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(_) => {
-                        // macOS: dispatch icon update to main thread via GCD
-                        #[cfg(target_os = "macos")]
-                        dispatch_to_main(refresh_icon);
-                        // Windows/Linux: set flag, don't touch tray from background thread
-                        // (causes crashes when network state changes during VPN connect)
-                        #[cfg(not(target_os = "macos"))]
-                        STATUS_CHANGED.store(true, Ordering::Relaxed);
+                        // Dispatch tray refresh to main thread (safe on all platforms)
+                        dispatch_to_main(refresh_tray);
                     }
                     Err(_) => break,
                 }
@@ -123,7 +117,9 @@ fn subscribe_loop() {
     }
 }
 
-/// Dispatch a function to the main thread (macOS GCD)
+// ── Platform dispatch: safely run a function on the main thread ──────────────
+
+/// macOS: use GCD dispatch_async_f to the main queue
 #[cfg(target_os = "macos")]
 fn dispatch_to_main(f: fn()) {
     use std::ffi::c_void;
@@ -147,10 +143,98 @@ fn dispatch_to_main(f: fn()) {
     }
 }
 
-// On Windows/Linux, subscribe thread uses STATUS_CHANGED atomic flag instead of dispatch_to_main
+/// Windows: use PostMessageW to a message-only window (same pattern as GPUI internally)
+#[cfg(target_os = "windows")]
+fn dispatch_to_main(f: fn()) {
+    win_dispatch::post(f);
+}
 
-/// Update only the tray icon based on current status.
-/// Safe to call from any thread — does not touch the menu.
+/// Linux: call directly (GTK tray-icon handles cross-thread updates)
+#[cfg(target_os = "linux")]
+fn dispatch_to_main(f: fn()) {
+    f();
+}
+
+// ── Windows dispatch implementation ──────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+mod win_dispatch {
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    const WM_FORTIVPN_DISPATCH: u32 = WM_USER + 100;
+    const CLASS_NAME: &str = "FortiVPNDispatch\0";
+
+    static DISPATCH_HWND: Mutex<Option<isize>> = Mutex::new(None);
+    static PENDING_FNS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
+
+    /// Create a message-only window on the current (main) thread.
+    /// Must be called before GPUI takes over the event loop.
+    pub fn init() {
+        unsafe {
+            let class_name: Vec<u16> = CLASS_NAME.encode_utf16().collect();
+
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wnd_proc),
+                lpszClassName: class_name.as_ptr(),
+                ..std::mem::zeroed()
+            };
+            RegisterClassW(&wc);
+
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE, // message-only window (invisible)
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+
+            if hwnd != std::ptr::null_mut() {
+                *DISPATCH_HWND.lock().unwrap() = Some(hwnd as isize);
+            }
+        }
+    }
+
+    /// Post a function to be executed on the main thread.
+    pub fn post(f: fn()) {
+        PENDING_FNS.lock().unwrap().push(f);
+        if let Some(hwnd) = *DISPATCH_HWND.lock().unwrap() {
+            unsafe {
+                PostMessageW(hwnd as HWND, WM_FORTIVPN_DISPATCH, 0, 0);
+            }
+        }
+    }
+
+    /// Window procedure — processes dispatched messages on the main thread.
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_FORTIVPN_DISPATCH {
+            // Drain and execute all pending functions
+            let fns: Vec<fn()> = PENDING_FNS.lock().unwrap().drain(..).collect();
+            for f in fns {
+                f();
+            }
+            return 0;
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+// ── Tray update functions ────────────────────────────────────────────────────
+
+/// Update tray icon based on current status.
 fn refresh_icon() {
     let status = ipc_client::get_status();
     let is_connected = status
@@ -167,10 +251,8 @@ fn refresh_icon() {
     if let Ok(guard) = TRAY.lock() {
         if let Some(holder) = guard.as_ref() {
             if let Ok(icon) = load_icon(icon_bytes) {
-                // macOS: use template icon (adapts to menu bar theme)
                 #[cfg(target_os = "macos")]
                 let _ = holder.0.set_icon_with_as_template(Some(icon), true);
-                // Windows/Linux: use regular icon
                 #[cfg(not(target_os = "macos"))]
                 let _ = holder.0.set_icon(Some(icon));
             }
@@ -178,7 +260,7 @@ fn refresh_icon() {
     }
 }
 
-/// Rebuild tray menu AND update icon. Call from main thread only (menu event handlers).
+/// Rebuild tray menu AND update icon.
 fn refresh_tray() {
     refresh_icon();
     if let Ok(guard) = TRAY.lock() {
@@ -189,12 +271,9 @@ fn refresh_tray() {
     }
 }
 
-fn handle_menu_event(id: &str) {
-    // Check if subscribe thread flagged a status change — refresh tray on main thread
-    if STATUS_CHANGED.swap(false, Ordering::Relaxed) {
-        refresh_tray();
-    }
+// ── Menu event handling ──────────────────────────────────────────────────────
 
+fn handle_menu_event(id: &str) {
     if let Some(profile_name) = id.strip_prefix("connect:") {
         let profiles = ipc_client::get_profiles();
         if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
@@ -226,7 +305,6 @@ fn handle_menu_event(id: &str) {
         notification::show("FortiVPN Disconnected", "VPN connection closed");
         refresh_tray();
     } else if id == "settings" {
-        // Dispatch to next run loop iteration to avoid reentrant GPUI calls
         dispatch_to_main(open_settings_window);
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
@@ -262,6 +340,8 @@ impl gpui::Render for HiddenView {
         gpui::div()
     }
 }
+
+// ── Tray menu building ───────────────────────────────────────────────────────
 
 fn build_tray_menu() -> Menu {
     let menu = Menu::new();
@@ -341,7 +421,6 @@ fn ensure_daemon() {
                 }
 
                 // On Windows, use ShellExecute with "runas" to trigger UAC elevation
-                // The daemon needs admin for TUN creation and route management
                 #[cfg(windows)]
                 {
                     use std::os::windows::ffi::OsStrExt;
