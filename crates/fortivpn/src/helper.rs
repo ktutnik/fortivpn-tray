@@ -229,8 +229,8 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
+    use crate::silent_cmd;
     use std::net::Ipv4Addr;
-    use std::process::Command;
 
     use tun2::AsyncDevice;
 
@@ -267,7 +267,7 @@ mod platform {
 
         /// Add a route via `route.exe ADD`.
         pub fn add_route(&mut self, dest: &str, gateway: &str) -> Result<(), FortiError> {
-            let output = Command::new("route")
+            let output = silent_cmd("route")
                 .args(["ADD", dest, "MASK", "255.255.255.255", gateway])
                 .output()
                 .map_err(|e| FortiError::RoutingError(format!("route ADD: {e}")))?;
@@ -288,7 +288,7 @@ mod platform {
 
         /// Delete a route via `route.exe DELETE`.
         pub fn delete_route(&mut self, dest: &str) -> Result<(), FortiError> {
-            let output = Command::new("route")
+            let output = silent_cmd("route")
                 .args(["DELETE", dest])
                 .output()
                 .map_err(|e| FortiError::RoutingError(format!("route DELETE: {e}")))?;
@@ -310,7 +310,7 @@ mod platform {
                 let server_str = server.to_string();
                 let index_str = (i + 1).to_string();
 
-                let mut cmd = Command::new("netsh");
+                let mut cmd = silent_cmd("netsh");
                 if i == 0 {
                     cmd.args(["interface", "ip", "set", "dns"])
                         .arg(format!("name={iface_owned}"))
@@ -340,7 +340,7 @@ mod platform {
         pub fn restore_dns(&mut self) -> Result<(), FortiError> {
             let iface = self.tun_name.as_deref().unwrap_or("FortiVPN");
 
-            let output = Command::new("netsh")
+            let output = silent_cmd("netsh")
                 .args(["interface", "ip", "set", "dns"])
                 .arg(format!("name={iface}"))
                 .arg("dhcp")

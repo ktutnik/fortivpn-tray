@@ -8,6 +8,19 @@ pub mod tun;
 pub mod tunnel;
 
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::process::Command;
+
+/// Create a Command that doesn't show a console window on Windows.
+pub fn silent_cmd(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 

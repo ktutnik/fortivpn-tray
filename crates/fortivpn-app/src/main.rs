@@ -140,6 +140,16 @@ fn dispatch_to_main(f: fn()) {
 
 #[cfg(not(target_os = "macos"))]
 fn dispatch_to_main(f: fn()) {
+    // Use GPUI's AsyncApp::update to dispatch to the main thread
+    if let Ok(guard) = GPUI_APP.lock() {
+        if let Some(holder) = guard.as_ref() {
+            let _ = holder.0.update(|_cx| {
+                f();
+            });
+            return;
+        }
+    }
+    // Fallback: call directly (may not update UI correctly)
     f();
 }
 

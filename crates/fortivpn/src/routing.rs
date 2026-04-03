@@ -1,6 +1,9 @@
 use std::net::Ipv4Addr;
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use crate::silent_cmd;
+
 use crate::helper::HelperClient;
 use crate::{FortiError, VpnConfig};
 
@@ -214,7 +217,7 @@ fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> 
         if !gateway.is_empty() {
             args.push(gateway);
         }
-        let output = Command::new("route")
+        let output = silent_cmd("route")
             .args(&args)
             .output()
             .map_err(|e| FortiError::RoutingError(format!("route {action}: {e}")))?;
@@ -271,7 +274,7 @@ fn get_default_gateway() -> Option<Ipv4Addr> {
 
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("route")
+        let output = silent_cmd("route")
             .args(["print", "0.0.0.0"])
             .output()
             .ok()?;
@@ -330,7 +333,7 @@ fn configure_dns(tun_name: &str, config: &VpnConfig) -> Result<(), FortiError> {
     #[cfg(target_os = "windows")]
     {
         for dns in &config.dns_servers {
-            let _ = Command::new("netsh")
+            let _ = silent_cmd("netsh")
                 .args([
                     "interface",
                     "ip",
