@@ -104,11 +104,15 @@ DEOF
     MINGW*|MSYS*|CYGWIN*)
         # --- Windows (Git Bash / MSYS2) ---
 
-        # Kill running instances
-        echo "[1/4] Stopping running instances..."
+        # Kill running instances (daemon may run elevated, so use PowerShell with admin)
+        echo "[1/5] Stopping running instances..."
         taskkill //F //IM fortivpn-app.exe 2>/dev/null || true
         taskkill //F //IM fortivpn-daemon.exe 2>/dev/null || true
-        sleep 1
+        # If daemon is elevated, taskkill fails — use PowerShell to kill as admin
+        powershell.exe -NoProfile -Command "
+            Start-Process powershell -ArgumentList '-NoProfile','-Command','Stop-Process -Name fortivpn-daemon -Force -ErrorAction SilentlyContinue; Stop-Process -Name fortivpn-app -Force -ErrorAction SilentlyContinue' -Verb RunAs -WindowStyle Hidden -Wait
+        " 2>/dev/null || true
+        sleep 2
 
         echo "[2/4] Building..."
         cargo build --release -p fortivpn-daemon -p fortivpn-app -p fortivpn-cli
