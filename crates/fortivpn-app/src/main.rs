@@ -160,25 +160,71 @@ fn dispatch_to_main(f: fn()) {
 #[cfg(target_os = "windows")]
 mod win_dispatch {
     use std::sync::Mutex;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+    // Raw FFI — avoids windows-sys feature flag issues
+    type HWND = isize;
+    type WPARAM = usize;
+    type LPARAM = isize;
+    type LRESULT = isize;
+    type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>;
+
+    const WM_USER: u32 = 0x0400;
     const WM_FORTIVPN_DISPATCH: u32 = WM_USER + 100;
-    const CLASS_NAME: &str = "FortiVPNDispatch\0";
+    const HWND_MESSAGE: HWND = -3;
 
-    static DISPATCH_HWND: Mutex<Option<isize>> = Mutex::new(None);
+    #[repr(C)]
+    struct WNDCLASSW {
+        style: u32,
+        lpfn_wnd_proc: WNDPROC,
+        cb_cls_extra: i32,
+        cb_wnd_extra: i32,
+        h_instance: isize,
+        h_icon: isize,
+        h_cursor: isize,
+        hbr_background: isize,
+        lpsz_menu_name: *const u16,
+        lpsz_class_name: *const u16,
+    }
+
+    extern "system" {
+        fn RegisterClassW(lpwndclass: *const WNDCLASSW) -> u16;
+        fn CreateWindowExW(
+            dwexstyle: u32,
+            lpclassname: *const u16,
+            lpwindowname: *const u16,
+            dwstyle: u32,
+            x: i32,
+            y: i32,
+            nwidth: i32,
+            nheight: i32,
+            hwndparent: HWND,
+            hmenu: isize,
+            hinstance: isize,
+            lpparam: *const std::ffi::c_void,
+        ) -> HWND;
+        fn PostMessageW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> i32;
+        fn DefWindowProcW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
+    }
+
+    static DISPATCH_HWND: Mutex<Option<HWND>> = Mutex::new(None);
     static PENDING_FNS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
 
     /// Create a message-only window on the current (main) thread.
-    /// Must be called before GPUI takes over the event loop.
     pub fn init() {
         unsafe {
-            let class_name: Vec<u16> = CLASS_NAME.encode_utf16().collect();
+            let class_name: Vec<u16> = "FortiVPNDispatch\0".encode_utf16().collect();
 
             let wc = WNDCLASSW {
-                lpfnWndProc: Some(wnd_proc),
-                lpszClassName: class_name.as_ptr(),
-                ..std::mem::zeroed()
+                style: 0,
+                lpfn_wnd_proc: Some(wnd_proc),
+                cb_cls_extra: 0,
+                cb_wnd_extra: 0,
+                h_instance: 0,
+                h_icon: 0,
+                h_cursor: 0,
+                hbr_background: 0,
+                lpsz_menu_name: std::ptr::null(),
+                lpsz_class_name: class_name.as_ptr(),
             };
             RegisterClassW(&wc);
 
@@ -191,14 +237,14 @@ mod win_dispatch {
                 0,
                 0,
                 0,
-                HWND_MESSAGE, // message-only window (invisible)
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                HWND_MESSAGE,
+                0,
+                0,
                 std::ptr::null(),
             );
 
-            if hwnd != std::ptr::null_mut() {
-                *DISPATCH_HWND.lock().unwrap() = Some(hwnd as isize);
+            if hwnd != 0 {
+                *DISPATCH_HWND.lock().unwrap() = Some(hwnd);
             }
         }
     }
@@ -208,7 +254,7 @@ mod win_dispatch {
         PENDING_FNS.lock().unwrap().push(f);
         if let Some(hwnd) = *DISPATCH_HWND.lock().unwrap() {
             unsafe {
-                PostMessageW(hwnd as HWND, WM_FORTIVPN_DISPATCH, 0, 0);
+                PostMessageW(hwnd, WM_FORTIVPN_DISPATCH, 0, 0);
             }
         }
     }
@@ -221,7 +267,6 @@ mod win_dispatch {
         lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_FORTIVPN_DISPATCH {
-            // Drain and execute all pending functions
             let fns: Vec<fn()> = PENDING_FNS.lock().unwrap().drain(..).collect();
             for f in fns {
                 f();
