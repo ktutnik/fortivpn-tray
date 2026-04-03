@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
 #[cfg(target_os = "windows")]
