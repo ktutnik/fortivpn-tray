@@ -25,6 +25,10 @@ unsafe impl Sync for AppHolder {}
 
 static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 
+/// Cached VPN status — updated by subscribe thread, read by tray refresh.
+/// Avoids blocking IPC calls during tray updates.
+static CACHED_STATUS: Mutex<Option<ipc_client::StatusResponse>> = Mutex::new(None);
+
 fn main() {
     // Ensure daemon is running
     ensure_daemon();
@@ -43,7 +47,6 @@ fn main() {
         *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
 
         // Create a hidden window to keep GPUI alive on Windows
-        // (GPUI exits when the last window closes, but we need the tray to stay active)
         #[cfg(target_os = "windows")]
         {
             use gpui::{px, AppContext};
@@ -91,6 +94,11 @@ fn main() {
             handle_menu_event(&id);
         }));
 
+        // Fetch initial status
+        if let Some(status) = ipc_client::get_status() {
+            *CACHED_STATUS.lock().unwrap() = Some(status);
+        }
+
         // Subscribe to daemon status events in background thread
         std::thread::spawn(|| {
             subscribe_loop();
@@ -98,28 +106,52 @@ fn main() {
     });
 }
 
-/// Subscribe to daemon status events and refresh tray on changes
+/// Subscribe to daemon status events.
+/// Parses status from the event and caches it — no extra IPC calls needed.
 fn subscribe_loop() {
     loop {
         if let Some(reader) = ipc_client::subscribe() {
             use std::io::BufRead;
             for line in reader.lines() {
                 match line {
-                    Ok(_) => {
-                        // Dispatch tray refresh to main thread (safe on all platforms)
+                    Ok(data) => {
+                        // Parse status from the subscribe event data
+                        // Events are JSON: {"event":"status","data":{"status":"connected",...}}
+                        // or raw status JSON depending on daemon implementation
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) {
+                            if let Some(status_data) = event.get("data") {
+                                if let Ok(status) =
+                                    serde_json::from_value::<ipc_client::StatusResponse>(
+                                        status_data.clone(),
+                                    )
+                                {
+                                    *CACHED_STATUS.lock().unwrap() = Some(status);
+                                }
+                            } else if let Ok(status) =
+                                serde_json::from_value::<ipc_client::StatusResponse>(event)
+                            {
+                                // Direct status object
+                                *CACHED_STATUS.lock().unwrap() = Some(status);
+                            }
+                        }
+                        // Dispatch tray refresh to main thread
                         dispatch_to_main(refresh_tray);
                     }
                     Err(_) => break,
                 }
             }
         }
+        // Also refresh status from daemon when reconnecting subscribe
+        if let Some(status) = ipc_client::get_status() {
+            *CACHED_STATUS.lock().unwrap() = Some(status);
+            dispatch_to_main(refresh_tray);
+        }
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
 
-// ── Platform dispatch: safely run a function on the main thread ──────────────
+// ── Platform dispatch ────────────────────────────────────────────────────────
 
-/// macOS: use GCD dispatch_async_f to the main queue
 #[cfg(target_os = "macos")]
 fn dispatch_to_main(f: fn()) {
     use std::ffi::c_void;
@@ -143,25 +175,22 @@ fn dispatch_to_main(f: fn()) {
     }
 }
 
-/// Windows: use PostMessageW to a message-only window (same pattern as GPUI internally)
 #[cfg(target_os = "windows")]
 fn dispatch_to_main(f: fn()) {
     win_dispatch::post(f);
 }
 
-/// Linux: call directly (GTK tray-icon handles cross-thread updates)
 #[cfg(target_os = "linux")]
 fn dispatch_to_main(f: fn()) {
     f();
 }
 
-// ── Windows dispatch implementation ──────────────────────────────────────────
+// ── Windows dispatch via PostMessageW ────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 mod win_dispatch {
     use std::sync::Mutex;
 
-    // Raw FFI — avoids windows-sys feature flag issues
     type HWND = isize;
     type WPARAM = usize;
     type LPARAM = isize;
@@ -209,7 +238,6 @@ mod win_dispatch {
     static DISPATCH_HWND: Mutex<Option<HWND>> = Mutex::new(None);
     static PENDING_FNS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
 
-    /// Create a message-only window on the current (main) thread.
     pub fn init() {
         unsafe {
             let class_name: Vec<u16> = "FortiVPNDispatch\0".encode_utf16().collect();
@@ -249,7 +277,6 @@ mod win_dispatch {
         }
     }
 
-    /// Post a function to be executed on the main thread.
     pub fn post(f: fn()) {
         PENDING_FNS.lock().unwrap().push(f);
         if let Some(hwnd) = *DISPATCH_HWND.lock().unwrap() {
@@ -259,7 +286,6 @@ mod win_dispatch {
         }
     }
 
-    /// Window procedure — processes dispatched messages on the main thread.
     unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
         msg: u32,
@@ -279,13 +305,18 @@ mod win_dispatch {
 
 // ── Tray update functions ────────────────────────────────────────────────────
 
-/// Update tray icon based on current status.
+/// Read cached status (no IPC call — safe during network changes).
+fn get_cached_connected() -> bool {
+    CACHED_STATUS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.status == "connected"))
+        .unwrap_or(false)
+}
+
+/// Update tray icon from cache (no IPC calls).
 fn refresh_icon() {
-    let status = ipc_client::get_status();
-    let is_connected = status
-        .as_ref()
-        .map(|s| s.status == "connected")
-        .unwrap_or(false);
+    let is_connected = get_cached_connected();
 
     let icon_bytes = if is_connected {
         include_bytes!("../../../icons/vpn-connected.png").as_slice()
@@ -305,7 +336,7 @@ fn refresh_icon() {
     }
 }
 
-/// Rebuild tray menu AND update icon.
+/// Rebuild tray menu AND update icon (no IPC calls — uses cache + fresh profile fetch).
 fn refresh_tray() {
     refresh_icon();
     if let Ok(guard) = TRAY.lock() {
@@ -334,6 +365,10 @@ fn handle_menu_event(id: &str) {
                         notification::show("Connection Failed", &r.message);
                     }
                 }
+                // Update cache and tray immediately
+                if let Some(status) = ipc_client::get_status() {
+                    *CACHED_STATUS.lock().unwrap() = Some(status);
+                }
                 refresh_tray();
             } else {
                 notification::show(
@@ -348,6 +383,9 @@ fn handle_menu_event(id: &str) {
     } else if id.starts_with("disconnect:") {
         ipc_client::disconnect_vpn();
         notification::show("FortiVPN Disconnected", "VPN connection closed");
+        if let Some(status) = ipc_client::get_status() {
+            *CACHED_STATUS.lock().unwrap() = Some(status);
+        }
         refresh_tray();
     } else if id == "settings" {
         dispatch_to_main(open_settings_window);
@@ -392,17 +430,19 @@ fn build_tray_menu() -> Menu {
     let menu = Menu::new();
 
     let profiles = ipc_client::get_profiles();
-    let status = ipc_client::get_status();
-    let is_connected = status
+
+    // Use cached status (no IPC call — safe from PostMessageW handler)
+    let cached = CACHED_STATUS.lock().ok().and_then(|g| g.clone());
+    let is_connected = cached
         .as_ref()
         .map(|s| s.status == "connected")
         .unwrap_or(false);
     let is_busy = is_connected
-        || status
+        || cached
             .as_ref()
             .map(|s| s.status == "connecting" || s.status == "disconnecting")
             .unwrap_or(false);
-    let connected_name = status.as_ref().and_then(|s| s.profile.clone());
+    let connected_name = cached.as_ref().and_then(|s| s.profile.clone());
 
     for profile in &profiles {
         let this_connected = is_connected && connected_name.as_deref() == Some(&profile.name);
@@ -465,7 +505,6 @@ fn ensure_daemon() {
                     let _ = Command::new(&daemon).spawn();
                 }
 
-                // On Windows, use ShellExecute with "runas" to trigger UAC elevation
                 #[cfg(windows)]
                 {
                     use std::os::windows::ffi::OsStrExt;

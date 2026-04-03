@@ -22,7 +22,7 @@ pub struct VpnProfile {
     pub trusted_cert: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StatusResponse {
     pub status: String,
     pub profile: Option<String>,
