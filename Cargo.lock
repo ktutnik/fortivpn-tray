@@ -2087,6 +2087,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "aws-lc-rs",
+ "dirs 6.0.0",
  "gpui",
  "gpui-component",
  "image",

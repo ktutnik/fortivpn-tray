@@ -34,10 +34,25 @@ static STATUS_TX: std::sync::OnceLock<async_channel::Sender<ipc_client::StatusRe
     std::sync::OnceLock::new();
 
 fn main() {
+    // Set up logging to file for debugging (especially on Windows where there's no console)
+    init_logging();
+    log("app", "FortiVPN app starting");
+
+    // Install panic hook that logs to file
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {info}");
+        log("panic", &msg);
+        // Also write to a crash file for easy discovery
+        if let Some(dir) = dirs::config_dir() {
+            let crash_file = dir.join("fortivpn-tray").join("crash.log");
+            let _ = std::fs::write(&crash_file, &msg);
+        }
+    }));
+
     // Ensure daemon is running
     ensure_daemon();
 
-    // Platform init (Windows: hidden keepalive window setup, etc.)
+    // Platform init
     platform::init();
 
     let app = gpui::Application::new();
@@ -82,13 +97,15 @@ fn main() {
         // GPUI task: await status updates from subscribe thread, refresh tray on main thread.
         // recv().await suspends with zero CPU — no polling, no timer, no battery drain.
         cx.spawn(async move |_cx| {
+            log("spawn", "GPUI status listener started");
             while let Ok(status) = rx.recv().await {
+                log("spawn", &format!("Received status: {}", status.status));
                 *CACHED_STATUS.lock().unwrap() = Some(status);
-                // Only update the icon from the async task — safe, no IPC.
-                // Menu rebuild with set_menu() from a GPUI task can break
-                // menu event handling on Windows.
+                log("spawn", "Calling refresh_icon...");
                 refresh_icon();
+                log("spawn", "refresh_icon completed");
             }
+            log("spawn", "GPUI status listener ended");
         })
         .detach();
 
@@ -102,29 +119,47 @@ fn main() {
 /// Subscribe to daemon status events.
 /// Parses status from events and sends to main thread via async channel.
 fn subscribe_loop() {
+    log("subscribe", "Subscribe loop started");
     loop {
+        log("subscribe", "Connecting to daemon subscribe...");
         if let Some(reader) = ipc_client::subscribe() {
+            log("subscribe", "Connected to subscribe channel");
             use std::io::BufRead;
             for line in reader.lines() {
                 match line {
                     Ok(data) => {
+                        log(
+                            "subscribe",
+                            &format!("Received: {}", &data[..data.len().min(100)]),
+                        );
                         if let Some(status) = parse_status_event(&data) {
+                            log("subscribe", &format!("Parsed status: {}", status.status));
                             if let Some(tx) = STATUS_TX.get() {
+                                log("subscribe", "Sending to async channel...");
                                 let _ = tx.send_blocking(status);
+                                log("subscribe", "Sent to async channel");
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        log("subscribe", &format!("Read error: {e}"));
+                        break;
+                    }
                 }
             }
+            log("subscribe", "Subscribe connection lost");
+        } else {
+            log("subscribe", "Failed to connect to subscribe");
         }
         // Reconnect: refresh status and profiles from daemon
+        log("subscribe", "Refreshing profiles from daemon...");
         if let Some(status) = ipc_client::get_status() {
             *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
             if let Some(tx) = STATUS_TX.get() {
                 let _ = tx.send_blocking(status);
             }
         }
+        log("subscribe", "Waiting 3s before reconnect...");
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
@@ -151,7 +186,9 @@ fn get_cached_connected() -> bool {
 }
 
 fn refresh_icon() {
+    log("refresh", "refresh_icon called");
     let is_connected = get_cached_connected();
+    log("refresh", &format!("is_connected={is_connected}"));
 
     let icon_bytes = if is_connected {
         include_bytes!("../../../icons/vpn-connected.png").as_slice()
@@ -161,10 +198,19 @@ fn refresh_icon() {
 
     if let Ok(guard) = TRAY.lock() {
         if let Some(holder) = guard.as_ref() {
+            log("refresh", "Loading icon...");
             if let Ok(icon) = load_icon(icon_bytes) {
+                log("refresh", "Setting tray icon...");
                 platform::set_tray_icon(&holder.0, icon);
+                log("refresh", "Tray icon set");
+            } else {
+                log("refresh", "Failed to load icon");
             }
+        } else {
+            log("refresh", "TRAY holder is None");
         }
+    } else {
+        log("refresh", "Failed to lock TRAY mutex");
     }
 }
 
@@ -299,6 +345,38 @@ fn load_icon(bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Ok(Icon::from_rgba(rgba.into_raw(), w, h)?)
+}
+
+// ── Logging ──────────────────────────────────────────────────────────────────
+
+fn init_logging() {
+    if let Some(dir) = dirs::config_dir() {
+        let log_dir = dir.join("fortivpn-tray");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join("app.log");
+        // Truncate log on startup (keep only current session)
+        let _ = std::fs::write(
+            &log_file,
+            format!(
+                "=== FortiVPN App started at {:?} ===\n",
+                std::time::SystemTime::now()
+            ),
+        );
+    }
+}
+
+fn log(tag: &str, msg: &str) {
+    if let Some(dir) = dirs::config_dir() {
+        let log_file = dir.join("fortivpn-tray").join("app.log");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+        {
+            let _ = writeln!(f, "[{tag}] {msg}");
+        }
+    }
 }
 
 fn ensure_daemon() {
