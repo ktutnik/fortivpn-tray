@@ -3,11 +3,9 @@
 
 mod ipc_client;
 mod keychain;
-mod notification;
+mod platform;
 mod settings;
 
-#[cfg(unix)]
-use std::process::Command;
 use std::sync::Mutex;
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -33,9 +31,8 @@ fn main() {
     // Ensure daemon is running
     ensure_daemon();
 
-    // Initialize Windows dispatch mechanism before GPUI takes over the event loop
-    #[cfg(target_os = "windows")]
-    win_dispatch::init();
+    // Initialize platform-specific dispatch mechanism before GPUI takes over the event loop
+    platform::init();
 
     let app = gpui::Application::new();
 
@@ -46,33 +43,11 @@ fn main() {
         // Store AsyncApp for opening windows from menu events
         *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
 
-        // Create a hidden window to keep GPUI alive on Windows
-        #[cfg(target_os = "windows")]
-        {
-            use gpui::{px, AppContext};
-            let _ = cx.open_window(
-                gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
-                        gpui::point(px(0.), px(0.)),
-                        gpui::size(px(1.), px(1.)),
-                    ))),
-                    ..Default::default()
-                },
-                |_window, cx| cx.new(|_| HiddenView),
-            );
-        }
+        // Create a hidden window to keep GPUI alive (Windows only, no-op on others)
+        platform::create_keepalive_window(cx);
 
-        // Hide from Dock (macOS)
-        #[cfg(target_os = "macos")]
-        {
-            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-            if let Some(mtm) = objc2::MainThreadMarker::new() {
-                let ns_app = NSApplication::sharedApplication(mtm);
-                ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            }
-        }
+        // Hide from Dock (macOS only, no-op on others)
+        platform::hide_from_dock(cx);
 
         // Build tray icon
         let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
@@ -135,7 +110,7 @@ fn subscribe_loop() {
                             }
                         }
                         // Dispatch tray refresh to main thread
-                        dispatch_to_main(refresh_tray);
+                        platform::dispatch_to_main(refresh_tray);
                     }
                     Err(_) => break,
                 }
@@ -144,162 +119,9 @@ fn subscribe_loop() {
         // Also refresh status from daemon when reconnecting subscribe
         if let Some(status) = ipc_client::get_status() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
-            dispatch_to_main(refresh_tray);
+            platform::dispatch_to_main(refresh_tray);
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
-    }
-}
-
-// ── Platform dispatch ────────────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
-fn dispatch_to_main(f: fn()) {
-    use std::ffi::c_void;
-    extern "C" {
-        fn dispatch_async_f(
-            queue: *const c_void,
-            context: *mut c_void,
-            work: extern "C" fn(*mut c_void),
-        );
-        static _dispatch_main_q: c_void;
-    }
-
-    extern "C" fn trampoline(ctx: *mut c_void) {
-        let f: fn() = unsafe { std::mem::transmute(ctx) };
-        f();
-    }
-
-    unsafe {
-        let main_q = &raw const _dispatch_main_q;
-        dispatch_async_f(main_q, f as *mut c_void, trampoline);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn dispatch_to_main(f: fn()) {
-    win_dispatch::post(f);
-}
-
-#[cfg(target_os = "linux")]
-fn dispatch_to_main(f: fn()) {
-    f();
-}
-
-// ── Windows dispatch via PostMessageW ────────────────────────────────────────
-
-#[cfg(target_os = "windows")]
-mod win_dispatch {
-    use std::sync::Mutex;
-
-    type HWND = isize;
-    type WPARAM = usize;
-    type LPARAM = isize;
-    type LRESULT = isize;
-    type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>;
-
-    const WM_USER: u32 = 0x0400;
-    const WM_FORTIVPN_DISPATCH: u32 = WM_USER + 100;
-    const HWND_MESSAGE: HWND = -3;
-
-    #[repr(C)]
-    struct WNDCLASSW {
-        style: u32,
-        lpfn_wnd_proc: WNDPROC,
-        cb_cls_extra: i32,
-        cb_wnd_extra: i32,
-        h_instance: isize,
-        h_icon: isize,
-        h_cursor: isize,
-        hbr_background: isize,
-        lpsz_menu_name: *const u16,
-        lpsz_class_name: *const u16,
-    }
-
-    extern "system" {
-        fn RegisterClassW(lpwndclass: *const WNDCLASSW) -> u16;
-        fn CreateWindowExW(
-            dwexstyle: u32,
-            lpclassname: *const u16,
-            lpwindowname: *const u16,
-            dwstyle: u32,
-            x: i32,
-            y: i32,
-            nwidth: i32,
-            nheight: i32,
-            hwndparent: HWND,
-            hmenu: isize,
-            hinstance: isize,
-            lpparam: *const std::ffi::c_void,
-        ) -> HWND;
-        fn PostMessageW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> i32;
-        fn DefWindowProcW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
-    }
-
-    static DISPATCH_HWND: Mutex<Option<HWND>> = Mutex::new(None);
-    static PENDING_FNS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
-
-    pub fn init() {
-        unsafe {
-            let class_name: Vec<u16> = "FortiVPNDispatch\0".encode_utf16().collect();
-
-            let wc = WNDCLASSW {
-                style: 0,
-                lpfn_wnd_proc: Some(wnd_proc),
-                cb_cls_extra: 0,
-                cb_wnd_extra: 0,
-                h_instance: 0,
-                h_icon: 0,
-                h_cursor: 0,
-                hbr_background: 0,
-                lpsz_menu_name: std::ptr::null(),
-                lpsz_class_name: class_name.as_ptr(),
-            };
-            RegisterClassW(&wc);
-
-            let hwnd = CreateWindowExW(
-                0,
-                class_name.as_ptr(),
-                std::ptr::null(),
-                0,
-                0,
-                0,
-                0,
-                0,
-                HWND_MESSAGE,
-                0,
-                0,
-                std::ptr::null(),
-            );
-
-            if hwnd != 0 {
-                *DISPATCH_HWND.lock().unwrap() = Some(hwnd);
-            }
-        }
-    }
-
-    pub fn post(f: fn()) {
-        PENDING_FNS.lock().unwrap().push(f);
-        if let Some(hwnd) = *DISPATCH_HWND.lock().unwrap() {
-            unsafe {
-                PostMessageW(hwnd, WM_FORTIVPN_DISPATCH, 0, 0);
-            }
-        }
-    }
-
-    unsafe extern "system" fn wnd_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if msg == WM_FORTIVPN_DISPATCH {
-            let fns: Vec<fn()> = PENDING_FNS.lock().unwrap().drain(..).collect();
-            for f in fns {
-                f();
-            }
-            return 0;
-        }
-        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 }
 
@@ -327,10 +149,7 @@ fn refresh_icon() {
     if let Ok(guard) = TRAY.lock() {
         if let Some(holder) = guard.as_ref() {
             if let Ok(icon) = load_icon(icon_bytes) {
-                #[cfg(target_os = "macos")]
-                let _ = holder.0.set_icon_with_as_template(Some(icon), true);
-                #[cfg(not(target_os = "macos"))]
-                let _ = holder.0.set_icon(Some(icon));
+                platform::set_tray_icon(&holder.0, icon);
             }
         }
     }
@@ -357,12 +176,12 @@ fn handle_menu_event(id: &str) {
                 let resp = ipc_client::connect_with_password(&profile.name, &password);
                 if let Some(r) = &resp {
                     if r.ok {
-                        notification::show(
+                        platform::show_notification(
                             "FortiVPN Connected",
                             &format!("Connected to {}", profile.name),
                         );
                     } else {
-                        notification::show("Connection Failed", &r.message);
+                        platform::show_notification("Connection Failed", &r.message);
                     }
                 }
                 // Update cache and tray immediately
@@ -371,7 +190,7 @@ fn handle_menu_event(id: &str) {
                 }
                 refresh_tray();
             } else {
-                notification::show(
+                platform::show_notification(
                     "No Password",
                     &format!(
                         "Set password for {} using CLI: fortivpn set-password",
@@ -382,13 +201,13 @@ fn handle_menu_event(id: &str) {
         }
     } else if id.starts_with("disconnect:") {
         ipc_client::disconnect_vpn();
-        notification::show("FortiVPN Disconnected", "VPN connection closed");
+        platform::show_notification("FortiVPN Disconnected", "VPN connection closed");
         if let Some(status) = ipc_client::get_status() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
         }
         refresh_tray();
     } else if id == "settings" {
-        dispatch_to_main(open_settings_window);
+        platform::dispatch_to_main(open_settings_window);
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
             if s.status == "connected" {
@@ -406,21 +225,6 @@ fn open_settings_window() {
                 settings::open_settings(cx);
             });
         }
-    }
-}
-
-/// Hidden view to keep GPUI event loop alive on Windows
-#[cfg(target_os = "windows")]
-struct HiddenView;
-
-#[cfg(target_os = "windows")]
-impl gpui::Render for HiddenView {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::Context<Self>,
-    ) -> impl gpui::IntoElement {
-        gpui::div()
     }
 }
 
@@ -493,41 +297,8 @@ fn ensure_daemon() {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            #[cfg(unix)]
-            let daemon_name = "fortivpn-daemon";
-            #[cfg(windows)]
-            let daemon_name = "fortivpn-daemon.exe";
-
-            let daemon = dir.join(daemon_name);
-            if daemon.exists() {
-                #[cfg(unix)]
-                {
-                    let _ = Command::new(&daemon).spawn();
-                }
-
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStrExt;
-                    let path: Vec<u16> = daemon
-                        .as_os_str()
-                        .encode_wide()
-                        .chain(std::iter::once(0))
-                        .collect();
-                    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
-                    unsafe {
-                        windows_sys::Win32::UI::Shell::ShellExecuteW(
-                            std::ptr::null_mut(),
-                            verb.as_ptr(),
-                            path.as_ptr(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            0, // SW_HIDE
-                        );
-                    }
-                }
-
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
+            platform::ensure_daemon(dir);
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }
 }
