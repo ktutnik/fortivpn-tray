@@ -84,7 +84,10 @@ fn main() {
         cx.spawn(async move |_cx| {
             while let Ok(status) = rx.recv().await {
                 *CACHED_STATUS.lock().unwrap() = Some(status);
-                refresh_tray();
+                // Only update the icon from the async task — safe, no IPC.
+                // Menu rebuild with set_menu() from a GPUI task can break
+                // menu event handling on Windows.
+                refresh_icon();
             }
         })
         .detach();
