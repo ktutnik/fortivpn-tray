@@ -26,6 +26,9 @@ static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 /// Cached VPN status — updated by subscribe thread, read by tray refresh.
 static CACHED_STATUS: Mutex<Option<ipc_client::StatusResponse>> = Mutex::new(None);
 
+/// Cached profiles — refreshed periodically, avoids blocking IPC during tray updates.
+static CACHED_PROFILES: Mutex<Vec<ipc_client::VpnProfile>> = Mutex::new(Vec::new());
+
 /// Channel sender for subscribe thread → GPUI main thread status updates.
 static STATUS_TX: std::sync::OnceLock<async_channel::Sender<ipc_client::StatusResponse>> =
     std::sync::OnceLock::new();
@@ -66,10 +69,11 @@ fn main() {
             handle_menu_event(&id);
         }));
 
-        // Fetch initial status
+        // Fetch initial status and profiles
         if let Some(status) = ipc_client::get_status() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
         }
+        *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
 
         // Create async channel for subscribe thread → main thread
         let (tx, rx) = async_channel::unbounded();
@@ -111,8 +115,9 @@ fn subscribe_loop() {
                 }
             }
         }
-        // Reconnect: refresh status from daemon
+        // Reconnect: refresh status and profiles from daemon
         if let Some(status) = ipc_client::get_status() {
+            *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
             if let Some(tx) = STATUS_TX.get() {
                 let _ = tx.send_blocking(status);
             }
@@ -174,7 +179,7 @@ fn refresh_tray() {
 
 fn handle_menu_event(id: &str) {
     if let Some(profile_name) = id.strip_prefix("connect:") {
-        let profiles = ipc_client::get_profiles();
+        let profiles = CACHED_PROFILES.lock().unwrap().clone();
         if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
             if let Some(password) = keychain::read_password(&profile.id) {
                 let resp = ipc_client::connect_with_password(&profile.name, &password);
@@ -236,7 +241,7 @@ fn open_settings_window() {
 fn build_tray_menu() -> Menu {
     let menu = Menu::new();
 
-    let profiles = ipc_client::get_profiles();
+    let profiles = CACHED_PROFILES.lock().unwrap().clone();
 
     let cached = CACHED_STATUS.lock().ok().and_then(|g| g.clone());
     let is_connected = cached
