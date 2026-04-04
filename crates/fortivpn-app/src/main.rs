@@ -6,11 +6,10 @@ mod keychain;
 mod platform;
 mod settings;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 // TrayIcon is !Sync, but we only access it from the main thread
 struct TrayHolder(TrayIcon);
@@ -24,20 +23,20 @@ unsafe impl Sync for AppHolder {}
 
 static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 
-/// Cached VPN status — updated by subscribe thread, read by tray refresh.
+/// Cached VPN status — updated by subscribe thread + async channel, read by tray refresh.
 static CACHED_STATUS: Mutex<Option<ipc_client::StatusResponse>> = Mutex::new(None);
 
 /// Cached profiles — refreshed on subscribe reconnect and after user actions.
 static CACHED_PROFILES: Mutex<Vec<ipc_client::VpnProfile>> = Mutex::new(Vec::new());
 
-/// Flag: subscribe thread signals that status changed. Checked by tray click handler.
-static STATUS_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Channel sender for subscribe thread → GPUI main thread.
+static STATUS_TX: std::sync::OnceLock<async_channel::Sender<ipc_client::StatusResponse>> =
+    std::sync::OnceLock::new();
 
 fn main() {
     init_logging();
     log("app", "FortiVPN app starting");
 
-    // Panic hook that logs to file
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {info}");
         log("panic", &msg);
@@ -60,7 +59,7 @@ fn main() {
         platform::create_keepalive_window(cx);
         platform::hide_from_dock(cx);
 
-        // Fetch initial status and profiles
+        // Fetch initial status and profiles BEFORE building menu
         if let Some(status) = ipc_client::get_status() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
         }
@@ -80,20 +79,31 @@ fn main() {
 
         *TRAY.lock().unwrap() = Some(TrayHolder(tray));
 
-        // Menu event handler
+        // Menu event handler — safe to call set_menu() here (muda borrow is released)
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
             let id = event.id().as_ref().to_string();
             handle_menu_event(&id);
         }));
 
-        // Tray icon click handler — refresh tray when user clicks the icon
-        // This picks up status changes from the subscribe thread
-        TrayIconEvent::set_event_handler(Some(|_event| {
-            if STATUS_CHANGED.swap(false, Ordering::Relaxed) {
-                log("tray", "Status changed — refreshing tray");
-                refresh_tray();
+        // NO TrayIconEvent handler — calling set_menu() from it causes muda RefCell panic
+
+        // Async channel: subscribe thread sends status, GPUI spawn receives and updates icon.
+        // ONLY refresh_icon() (set_icon) from spawn — NEVER set_menu() (muda RefCell crash).
+        let (tx, rx) = async_channel::unbounded();
+        STATUS_TX.set(tx).ok();
+
+        cx.spawn(async move |_cx| {
+            log("spawn", "GPUI icon listener started");
+            while let Ok(status) = rx.recv().await {
+                log("spawn", &format!("Status update: {}", status.status));
+                *CACHED_STATUS.lock().unwrap() = Some(status);
+                // ONLY update icon — set_icon() is safe (tray-icon RefCell, not muda RefCell)
+                // NEVER call set_menu() here — it triggers muda RefCell double borrow
+                refresh_icon();
+                log("spawn", "Icon updated");
             }
-        }));
+        })
+        .detach();
 
         // Subscribe to daemon events in background thread
         std::thread::spawn(|| {
@@ -105,55 +115,42 @@ fn main() {
 }
 
 /// Subscribe to daemon status events.
-/// Updates cached status and sets the STATUS_CHANGED flag.
-/// The tray click handler picks up the flag and refreshes.
 fn subscribe_loop() {
     log("subscribe", "Subscribe loop started");
     loop {
         log("subscribe", "Connecting to daemon subscribe...");
         if let Some(reader) = ipc_client::subscribe() {
-            log("subscribe", "Connected to subscribe channel");
+            log("subscribe", "Connected");
             use std::io::BufRead;
             for line in reader.lines() {
                 match line {
                     Ok(data) => {
-                        log(
-                            "subscribe",
-                            &format!("Received: {}", &data[..data.len().min(100)]),
-                        );
                         if let Some(status) = parse_status_event(&data) {
-                            log("subscribe", &format!("Parsed status: {}", status.status));
-                            *CACHED_STATUS.lock().unwrap() = Some(status);
-                            STATUS_CHANGED.store(true, Ordering::Relaxed);
-
-                            // On macOS, dispatch instant icon update via GCD (safe)
-                            #[cfg(target_os = "macos")]
-                            platform::dispatch_to_main(refresh_icon);
+                            log("subscribe", &format!("Status: {}", status.status));
+                            if let Some(tx) = STATUS_TX.get() {
+                                let _ = tx.send_blocking(status);
+                            }
                         }
                     }
                     Err(e) => {
-                        log("subscribe", &format!("Read error: {e}"));
+                        log("subscribe", &format!("Error: {e}"));
                         break;
                     }
                 }
             }
-            log("subscribe", "Subscribe connection lost");
-        } else {
-            log("subscribe", "Failed to connect to subscribe");
+            log("subscribe", "Connection lost");
         }
         // Reconnect: refresh profiles
-        log("subscribe", "Refreshing profiles...");
         if let Some(status) = ipc_client::get_status() {
-            *CACHED_STATUS.lock().unwrap() = Some(status);
             *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
-            STATUS_CHANGED.store(true, Ordering::Relaxed);
+            if let Some(tx) = STATUS_TX.get() {
+                let _ = tx.send_blocking(status);
+            }
         }
-        log("subscribe", "Waiting 3s before reconnect...");
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
 
-/// Parse a StatusResponse from a subscribe event line.
 fn parse_status_event(data: &str) -> Option<ipc_client::StatusResponse> {
     let event: serde_json::Value = serde_json::from_str(data).ok()?;
     if let Some(status_data) = event.get("data") {
@@ -172,10 +169,9 @@ fn get_cached_connected() -> bool {
         .unwrap_or(false)
 }
 
+/// Update ONLY the tray icon. Safe from GPUI spawn (no muda RefCell involved).
 fn refresh_icon() {
-    log("refresh", "refresh_icon called");
     let is_connected = get_cached_connected();
-
     let icon_bytes = if is_connected {
         include_bytes!("../../../icons/vpn-connected.png").as_slice()
     } else {
@@ -186,12 +182,12 @@ fn refresh_icon() {
         if let Some(holder) = guard.as_ref() {
             if let Ok(icon) = load_icon(icon_bytes) {
                 platform::set_tray_icon(&holder.0, icon);
-                log("refresh", "Tray icon updated");
             }
         }
     }
 }
 
+/// Rebuild icon AND menu. ONLY call from MenuEvent handler (muda borrow released).
 fn refresh_tray() {
     refresh_icon();
     if let Ok(guard) = TRAY.lock() {
@@ -205,11 +201,6 @@ fn refresh_tray() {
 // ── Menu event handling ──────────────────────────────────────────────────────
 
 fn handle_menu_event(id: &str) {
-    // Always refresh if status changed (in case tray click didn't fire first)
-    if STATUS_CHANGED.swap(false, Ordering::Relaxed) {
-        refresh_tray();
-    }
-
     if let Some(profile_name) = id.strip_prefix("connect:") {
         let profiles = CACHED_PROFILES.lock().unwrap().clone();
         if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
@@ -274,7 +265,6 @@ fn build_tray_menu() -> Menu {
     let menu = Menu::new();
 
     let profiles = CACHED_PROFILES.lock().unwrap().clone();
-
     let cached = CACHED_STATUS.lock().ok().and_then(|g| g.clone());
     let is_connected = cached
         .as_ref()
