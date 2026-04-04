@@ -1,11 +1,7 @@
 use std::net::Ipv4Addr;
-#[cfg(not(target_os = "windows"))]
-use std::process::Command;
-
-#[cfg(target_os = "windows")]
-use crate::silent_cmd;
 
 use crate::helper::HelperClient;
+use crate::platform;
 use crate::{FortiError, VpnConfig};
 
 /// Manages routes installed for the VPN connection.
@@ -33,10 +29,10 @@ impl RouteManager {
     }
 
     pub fn configure(&mut self, config: &VpnConfig) -> Result<(), FortiError> {
-        self.original_gateway = get_default_gateway();
+        self.original_gateway = platform::get_default_gateway();
 
         if let Some(orig_gw) = self.original_gateway {
-            run_route("add", &self.gateway_ip.to_string(), &orig_gw.to_string())?;
+            platform::run_route("add", &self.gateway_ip.to_string(), &orig_gw.to_string())?;
         }
 
         if !config.routes.is_empty() {
@@ -44,44 +40,45 @@ impl RouteManager {
             for (network, netmask) in &config.routes {
                 let cidr = netmask_to_cidr(netmask);
                 let dest = format!("{network}/{cidr}");
-                run_route("add", &dest, &config.assigned_ip.to_string())?;
+                platform::run_route("add", &dest, &config.assigned_ip.to_string())?;
                 self.installed_routes.push((*network, *netmask));
             }
         } else {
             // Full tunnel: route all traffic through VPN using 0/1 + 128/1
             // This covers all IPv4 without replacing the actual default route entry
-            run_route("add", "0.0.0.0/1", &config.assigned_ip.to_string())?;
-            run_route("add", "128.0.0.0/1", &config.assigned_ip.to_string())?;
+            platform::run_route("add", "0.0.0.0/1", &config.assigned_ip.to_string())?;
+            platform::run_route("add", "128.0.0.0/1", &config.assigned_ip.to_string())?;
             self.full_tunnel = true;
         }
 
-        configure_dns(&self.tun_name, config)?;
+        platform::configure_dns(&self.tun_name, config)?;
 
         Ok(())
     }
 
     pub fn restore(&mut self) {
-        restore_ipv6(&self.ipv6_disabled_interfaces);
+        platform::restore_ipv6(&self.ipv6_disabled_interfaces);
         self.ipv6_disabled_interfaces.clear();
 
         if self.full_tunnel {
-            let _ = run_route("delete", "0.0.0.0/1", "");
-            let _ = run_route("delete", "128.0.0.0/1", "");
+            let _ = platform::run_route("delete", "0.0.0.0/1", "");
+            let _ = platform::run_route("delete", "128.0.0.0/1", "");
             self.full_tunnel = false;
         }
 
         for (network, netmask) in &self.installed_routes {
             let cidr = netmask_to_cidr(netmask);
             let dest = format!("{network}/{cidr}");
-            let _ = run_route("delete", &dest, "");
+            let _ = platform::run_route("delete", &dest, "");
         }
         self.installed_routes.clear();
 
         if let Some(orig_gw) = self.original_gateway {
-            let _ = run_route("delete", &self.gateway_ip.to_string(), &orig_gw.to_string());
+            let _ =
+                platform::run_route("delete", &self.gateway_ip.to_string(), &orig_gw.to_string());
         }
 
-        restore_dns(&self.tun_name);
+        platform::restore_dns(&self.tun_name);
     }
 
     /// Configure routes via the privileged helper (no root needed in main process).
@@ -90,7 +87,7 @@ impl RouteManager {
         config: &VpnConfig,
         helper: &mut HelperClient,
     ) -> Result<(), FortiError> {
-        self.original_gateway = get_default_gateway();
+        self.original_gateway = platform::get_default_gateway();
 
         if let Some(orig_gw) = self.original_gateway {
             helper.add_route(&self.gateway_ip.to_string(), &orig_gw.to_string())?;
@@ -112,7 +109,7 @@ impl RouteManager {
         helper.configure_dns(config)?;
 
         // Disable IPv6 on active interfaces to prevent leaks (no root needed)
-        self.ipv6_disabled_interfaces = disable_ipv6();
+        self.ipv6_disabled_interfaces = platform::disable_ipv6();
 
         Ok(())
     }
@@ -126,7 +123,7 @@ impl RouteManager {
     /// Restore routes via the privileged helper.
     pub fn restore_via_helper(&mut self, helper: Option<&mut HelperClient>) {
         // Restore IPv6 first (no root needed)
-        restore_ipv6(&self.ipv6_disabled_interfaces);
+        platform::restore_ipv6(&self.ipv6_disabled_interfaces);
         self.ipv6_disabled_interfaces.clear();
 
         let Some(helper) = helper else {
@@ -164,299 +161,8 @@ impl Drop for RouteManager {
     }
 }
 
-fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut args = vec!["-n", action, dest];
-        if !gateway.is_empty() {
-            args.push(gateway);
-        }
-        let output = Command::new("/sbin/route")
-            .args(&args)
-            .output()
-            .map_err(|e| FortiError::RoutingError(format!("route {action}: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !(action == "delete" && stderr.contains("not in table")) {
-                return Err(FortiError::RoutingError(format!(
-                    "route {action} {dest}: {stderr}"
-                )));
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let ip_action = match action {
-            "add" => "add",
-            "delete" => "del",
-            _ => action,
-        };
-        let mut args = vec!["route", ip_action, dest];
-        if !gateway.is_empty() {
-            args.push("via");
-            args.push(gateway);
-        }
-        let output = Command::new("ip")
-            .args(&args)
-            .output()
-            .map_err(|e| FortiError::RoutingError(format!("ip route {ip_action}: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !(action == "delete" && stderr.contains("No such process")) {
-                return Err(FortiError::RoutingError(format!(
-                    "ip route {ip_action} {dest}: {stderr}"
-                )));
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let action_upper = action.to_uppercase();
-        let mut args = vec![action_upper.as_str(), dest];
-        if !gateway.is_empty() {
-            args.push(gateway);
-        }
-        let output = silent_cmd("route")
-            .args(&args)
-            .output()
-            .map_err(|e| FortiError::RoutingError(format!("route {action}: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FortiError::RoutingError(format!(
-                "route {action} {dest}: {stderr}"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn parse_gateway_output(stdout: &str) -> Option<Ipv4Addr> {
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("gateway:") {
-            let gw = trimmed.strip_prefix("gateway:")?.trim();
-            return gw.parse().ok();
-        }
-    }
-    None
-}
-
-fn get_default_gateway() -> Option<Ipv4Addr> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("route")
-            .args(["-n", "get", "default"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_gateway_output(&stdout)
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("ip")
-            .args(["route", "show", "default"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Format: "default via 192.168.1.1 dev eth0 ..."
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
-                return parts[2].parse().ok();
-            }
-        }
-        None
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let output = silent_cmd("route")
-            .args(["print", "0.0.0.0"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 && parts[0] == "0.0.0.0" && parts[1] == "0.0.0.0" {
-                return parts[2].parse().ok();
-            }
-        }
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn build_dns_script(dns_servers: &[Ipv4Addr], search_domain: &Option<String>) -> String {
-    let dns_ips: Vec<String> = dns_servers.iter().map(|ip| ip.to_string()).collect();
-    let mut script = format!("d.init\nd.add ServerAddresses * {}\n", dns_ips.join(" "));
-    if let Some(ref domain) = search_domain {
-        script.push_str(&format!("d.add SearchDomains * {domain}\n"));
-    }
-    script.push_str("set State:/Network/Service/fortivpn/DNS\n");
-    script
-}
-
-fn configure_dns(tun_name: &str, config: &VpnConfig) -> Result<(), FortiError> {
-    if config.dns_servers.is_empty() {
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let script = build_dns_script(&config.dns_servers, &config.search_domain);
-
-        let output = Command::new("scutil")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(ref mut stdin) = child.stdin {
-                    use std::io::Write;
-                    stdin.write_all(script.as_bytes())?;
-                }
-                child.wait_with_output()
-            })
-            .map_err(|e| FortiError::RoutingError(format!("scutil DNS: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FortiError::RoutingError(format!(
-                "scutil DNS failed: {stderr}"
-            )));
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        for dns in &config.dns_servers {
-            let _ = silent_cmd("netsh")
-                .args([
-                    "interface",
-                    "ip",
-                    "set",
-                    "dns",
-                    tun_name,
-                    "static",
-                    &dns.to_string(),
-                ])
-                .output();
-        }
-        return Ok(());
-    }
-
-    #[allow(unreachable_code)]
-    {
-        let _ = tun_name;
-        Ok(())
-    }
-}
-
-fn restore_dns(_tun_name: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let script = "remove State:/Network/Service/fortivpn/DNS\n";
-        let _ = Command::new("scutil")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(ref mut stdin) = child.stdin {
-                    use std::io::Write;
-                    stdin.write_all(script.as_bytes())?;
-                }
-                child.wait_with_output()
-            });
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // DNS cleaned up when adapter is removed
-    }
-}
-
 fn netmask_to_cidr(mask: &Ipv4Addr) -> u32 {
     u32::from_be_bytes(mask.octets()).count_ones()
-}
-
-/// Disable IPv6 on all active network interfaces to prevent traffic leaks.
-/// Returns the list of interfaces that were modified (for restore).
-/// No root required on macOS — `networksetup` works unprivileged.
-fn disable_ipv6() -> Vec<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let interfaces = get_ipv6_active_interfaces();
-        for iface in &interfaces {
-            let _ = Command::new("networksetup")
-                .args(["-setv6off", iface])
-                .output();
-        }
-        interfaces
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        Vec::new() // TODO
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Vec::new() // IPv6 disable via netsh is optional for now
-    }
-}
-
-/// Restore IPv6 on previously disabled interfaces.
-fn restore_ipv6(interfaces: &[String]) {
-    #[cfg(target_os = "macos")]
-    for iface in interfaces {
-        let _ = Command::new("networksetup")
-            .args(["-setv6automatic", iface])
-            .output();
-    }
-
-    #[cfg(target_os = "linux")]
-    let _ = interfaces;
-
-    #[cfg(target_os = "windows")]
-    let _ = interfaces;
-}
-
-/// Get network interfaces that currently have IPv6 enabled (automatic or manual).
-#[cfg(target_os = "macos")]
-fn get_ipv6_active_interfaces() -> Vec<String> {
-    let mut result = Vec::new();
-
-    let output = Command::new("networksetup")
-        .args(["-listallnetworkservices"])
-        .output();
-    let Ok(output) = output else { return result };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        // Skip the header line and disabled services (prefixed with *)
-        if line.starts_with('*') || line.contains("An asterisk") {
-            continue;
-        }
-        let service = line.trim();
-        if service.is_empty() {
-            continue;
-        }
-        // Check if this service has IPv6 enabled
-        if let Ok(v6_output) = Command::new("networksetup")
-            .args(["-getinfo", service])
-            .output()
-        {
-            let info = String::from_utf8_lossy(&v6_output.stdout);
-            if info.contains("IPv6: Automatic") || info.contains("IPv6: Manual") {
-                result.push(service.to_string());
-            }
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -519,7 +225,7 @@ mod tests {
     fn test_parse_gateway_output_typical() {
         let output = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n";
         assert_eq!(
-            parse_gateway_output(output),
+            platform::parse_gateway_output(output),
             Some(Ipv4Addr::new(192, 168, 1, 1))
         );
     }
@@ -528,20 +234,20 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_no_gateway() {
         let output = "   route to: default\ndestination: default\n  interface: en0\n";
-        assert_eq!(parse_gateway_output(output), None);
+        assert_eq!(platform::parse_gateway_output(output), None);
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_empty() {
-        assert_eq!(parse_gateway_output(""), None);
+        assert_eq!(platform::parse_gateway_output(""), None);
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_parse_gateway_output_invalid_ip() {
         let output = "    gateway: not-an-ip\n";
-        assert_eq!(parse_gateway_output(output), None);
+        assert_eq!(platform::parse_gateway_output(output), None);
     }
 
     #[test]
@@ -549,7 +255,7 @@ mod tests {
     fn test_parse_gateway_output_extra_whitespace() {
         let output = "    gateway:   10.0.0.1  \n";
         assert_eq!(
-            parse_gateway_output(output),
+            platform::parse_gateway_output(output),
             Some(Ipv4Addr::new(10, 0, 0, 1))
         );
     }
@@ -559,7 +265,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_build_dns_script_single_server() {
         let servers = vec![Ipv4Addr::new(8, 8, 8, 8)];
-        let script = build_dns_script(&servers, &None);
+        let script = platform::build_dns_script(&servers, &None);
         assert!(script.contains("d.init"));
         assert!(script.contains("d.add ServerAddresses * 8.8.8.8"));
         assert!(script.contains("set State:/Network/Service/fortivpn/DNS"));
@@ -570,7 +276,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_build_dns_script_multiple_servers() {
         let servers = vec![Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
-        let script = build_dns_script(&servers, &None);
+        let script = platform::build_dns_script(&servers, &None);
         assert!(script.contains("d.add ServerAddresses * 8.8.8.8 8.8.4.4"));
     }
 
@@ -579,7 +285,7 @@ mod tests {
     fn test_build_dns_script_with_search_domain() {
         let servers = vec![Ipv4Addr::new(10, 0, 0, 1)];
         let domain = Some("corp.example.com".to_string());
-        let script = build_dns_script(&servers, &domain);
+        let script = platform::build_dns_script(&servers, &domain);
         assert!(script.contains("d.add SearchDomains * corp.example.com"));
     }
 
@@ -587,7 +293,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_build_dns_script_no_search_domain() {
         let servers = vec![Ipv4Addr::new(10, 0, 0, 1)];
-        let script = build_dns_script(&servers, &None);
+        let script = platform::build_dns_script(&servers, &None);
         assert!(!script.contains("SearchDomains"));
     }
 
@@ -650,7 +356,7 @@ mod tests {
         // Some systems output "gateway:" followed by a link address
         let output = "   route to: default\n    gateway: link#5\n  interface: en0\n";
         // link#5 is not a valid IP
-        assert_eq!(parse_gateway_output(output), None);
+        assert_eq!(platform::parse_gateway_output(output), None);
     }
 
     #[test]
@@ -659,7 +365,7 @@ mod tests {
         // Should return the first gateway found
         let output = "    gateway: 10.0.0.1\n    gateway: 10.0.0.2\n";
         assert_eq!(
-            parse_gateway_output(output),
+            platform::parse_gateway_output(output),
             Some(Ipv4Addr::new(10, 0, 0, 1))
         );
     }
@@ -668,7 +374,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn test_build_dns_script_empty_servers() {
         let servers: Vec<Ipv4Addr> = vec![];
-        let script = build_dns_script(&servers, &None);
+        let script = platform::build_dns_script(&servers, &None);
         assert!(script.contains("d.init"));
         assert!(script.contains("d.add ServerAddresses *"));
     }
@@ -682,7 +388,7 @@ mod tests {
             Ipv4Addr::new(1, 1, 1, 1),
         ];
         let domain = Some("corp.example.com".to_string());
-        let script = build_dns_script(&servers, &domain);
+        let script = platform::build_dns_script(&servers, &domain);
         assert!(script.contains("8.8.8.8 8.8.4.4 1.1.1.1"));
         assert!(script.contains("SearchDomains * corp.example.com"));
         assert!(script.ends_with("set State:/Network/Service/fortivpn/DNS\n"));

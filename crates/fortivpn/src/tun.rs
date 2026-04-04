@@ -21,13 +21,5 @@ pub fn create_tun(ip: Ipv4Addr, peer_ip: Ipv4Addr, mtu: u16) -> Result<AsyncDevi
 
 /// Get the tun device name.
 pub fn device_name(dev: &AsyncDevice) -> String {
-    #[cfg(unix)]
-    {
-        dev.as_ref().tun_name().unwrap_or_default()
-    }
-    #[cfg(windows)]
-    {
-        use tun2::AbstractDevice;
-        dev.tun_name().unwrap_or_default()
-    }
+    crate::platform::device_name(dev)
 }

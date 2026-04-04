@@ -2,6 +2,7 @@ pub mod async_tun;
 pub mod auth;
 pub mod bridge;
 pub mod helper;
+pub mod platform;
 pub mod ppp;
 pub mod routing;
 pub mod tun;
@@ -141,23 +142,10 @@ impl VpnSession {
         };
 
         // Phase 4: Create tun device via privileged helper
-        // Unix: helper returns raw fd
-        #[cfg(unix)]
-        let (tun_dev, tun_name) = {
-            let (fd, name) = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
-            let dev = async_tun::AsyncTunFd::new(fd)
-                .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
-            (dev, name)
-        };
-
-        // Windows: helper returns AsyncDevice directly
-        #[cfg(windows)]
-        let (tun_dev, tun_name) = {
-            let (dev, name) = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
-            let dev = async_tun::AsyncTunFd::from_device(dev)
-                .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
-            (dev, name)
-        };
+        let tun_handle = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
+        let tun_name = tun_handle.1.clone();
+        let tun_dev = platform::AsyncTunFd::from_handle(tun_handle)
+            .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
 
         // Phase 5: Start bridge (tun ↔ tunnel)
         let shutdown = Arc::new(Notify::new());
