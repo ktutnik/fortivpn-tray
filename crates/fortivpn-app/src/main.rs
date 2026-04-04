@@ -50,6 +50,12 @@ fn main() {
         platform::create_keepalive_window(cx);
         platform::hide_from_dock(cx);
 
+        // Fetch initial status and profiles (before building tray menu)
+        if let Some(status) = ipc_client::get_status() {
+            *CACHED_STATUS.lock().unwrap() = Some(status);
+        }
+        *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
+
         // Build tray icon
         let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
             .expect("load tray icon");
@@ -68,12 +74,6 @@ fn main() {
             let id = event.id().as_ref().to_string();
             handle_menu_event(&id);
         }));
-
-        // Fetch initial status and profiles
-        if let Some(status) = ipc_client::get_status() {
-            *CACHED_STATUS.lock().unwrap() = Some(status);
-        }
-        *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
 
         // Create async channel for subscribe thread → main thread
         let (tx, rx) = async_channel::unbounded();
