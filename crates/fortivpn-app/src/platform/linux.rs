@@ -3,11 +3,6 @@ use std::process::Command;
 /// No-op on Linux — no pre-init needed.
 pub fn init() {}
 
-/// Direct call — Linux doesn't need main-thread dispatch.
-pub fn dispatch_to_main(f: fn()) {
-    f();
-}
-
 /// Spawn the daemon binary as a child process.
 pub fn ensure_daemon(daemon_dir: &std::path::Path) {
     let daemon = daemon_dir.join("fortivpn-daemon");

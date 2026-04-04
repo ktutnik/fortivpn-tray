@@ -2085,6 +2085,7 @@ dependencies = [
 name = "fortivpn-app"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "aws-lc-rs",
  "gpui",
  "gpui-component",

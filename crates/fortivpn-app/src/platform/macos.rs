@@ -1,30 +1,7 @@
-use std::ffi::c_void;
 use std::process::Command;
 
 /// No-op on macOS — no pre-init needed.
 pub fn init() {}
-
-/// Dispatch a function to the main thread via GCD.
-pub fn dispatch_to_main(f: fn()) {
-    extern "C" {
-        fn dispatch_async_f(
-            queue: *const c_void,
-            context: *mut c_void,
-            work: extern "C" fn(*mut c_void),
-        );
-        static _dispatch_main_q: c_void;
-    }
-
-    extern "C" fn trampoline(ctx: *mut c_void) {
-        let f: fn() = unsafe { std::mem::transmute(ctx) };
-        f();
-    }
-
-    unsafe {
-        let main_q = &raw const _dispatch_main_q;
-        dispatch_async_f(main_q, f as *mut c_void, trampoline);
-    }
-}
 
 /// Spawn the daemon binary as a child process.
 pub fn ensure_daemon(daemon_dir: &std::path::Path) {

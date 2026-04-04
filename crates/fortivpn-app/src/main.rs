@@ -24,29 +24,27 @@ unsafe impl Sync for AppHolder {}
 static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 
 /// Cached VPN status — updated by subscribe thread, read by tray refresh.
-/// Avoids blocking IPC calls during tray updates.
 static CACHED_STATUS: Mutex<Option<ipc_client::StatusResponse>> = Mutex::new(None);
+
+/// Channel sender for subscribe thread → GPUI main thread status updates.
+static STATUS_TX: std::sync::OnceLock<async_channel::Sender<ipc_client::StatusResponse>> =
+    std::sync::OnceLock::new();
 
 fn main() {
     // Ensure daemon is running
     ensure_daemon();
 
-    // Initialize platform-specific dispatch mechanism before GPUI takes over the event loop
+    // Platform init (Windows: hidden keepalive window setup, etc.)
     platform::init();
 
     let app = gpui::Application::new();
 
     app.run(|cx: &mut gpui::App| {
-        // Initialize gpui-component (theme, input, button, etc.)
         gpui_component::init(cx);
 
-        // Store AsyncApp for opening windows from menu events
         *GPUI_APP.lock().unwrap() = Some(AppHolder(cx.to_async()));
 
-        // Create a hidden window to keep GPUI alive (Windows only, no-op on others)
         platform::create_keepalive_window(cx);
-
-        // Hide from Dock (macOS only, no-op on others)
         platform::hide_from_dock(cx);
 
         // Build tray icon
@@ -63,7 +61,6 @@ fn main() {
 
         *TRAY.lock().unwrap() = Some(TrayHolder(tray));
 
-        // Bridge muda menu events
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
             let id = event.id().as_ref().to_string();
             handle_menu_event(&id);
@@ -74,7 +71,21 @@ fn main() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
         }
 
-        // Subscribe to daemon status events in background thread
+        // Create async channel for subscribe thread → main thread
+        let (tx, rx) = async_channel::unbounded();
+        STATUS_TX.set(tx).ok();
+
+        // GPUI task: await status updates from subscribe thread, refresh tray on main thread.
+        // recv().await suspends with zero CPU — no polling, no timer, no battery drain.
+        cx.spawn(async move |_cx| {
+            while let Ok(status) = rx.recv().await {
+                *CACHED_STATUS.lock().unwrap() = Some(status);
+                refresh_tray();
+            }
+        })
+        .detach();
+
+        // Subscribe to daemon events in background thread
         std::thread::spawn(|| {
             subscribe_loop();
         });
@@ -82,7 +93,7 @@ fn main() {
 }
 
 /// Subscribe to daemon status events.
-/// Parses status from the event and caches it — no extra IPC calls needed.
+/// Parses status from events and sends to main thread via async channel.
 fn subscribe_loop() {
     loop {
         if let Some(reader) = ipc_client::subscribe() {
@@ -90,44 +101,39 @@ fn subscribe_loop() {
             for line in reader.lines() {
                 match line {
                     Ok(data) => {
-                        // Parse status from the subscribe event data
-                        // Events are JSON: {"event":"status","data":{"status":"connected",...}}
-                        // or raw status JSON depending on daemon implementation
-                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) {
-                            if let Some(status_data) = event.get("data") {
-                                if let Ok(status) =
-                                    serde_json::from_value::<ipc_client::StatusResponse>(
-                                        status_data.clone(),
-                                    )
-                                {
-                                    *CACHED_STATUS.lock().unwrap() = Some(status);
-                                }
-                            } else if let Ok(status) =
-                                serde_json::from_value::<ipc_client::StatusResponse>(event)
-                            {
-                                // Direct status object
-                                *CACHED_STATUS.lock().unwrap() = Some(status);
+                        if let Some(status) = parse_status_event(&data) {
+                            if let Some(tx) = STATUS_TX.get() {
+                                let _ = tx.send_blocking(status);
                             }
                         }
-                        // Dispatch tray refresh to main thread
-                        platform::dispatch_to_main(refresh_tray);
                     }
                     Err(_) => break,
                 }
             }
         }
-        // Also refresh status from daemon when reconnecting subscribe
+        // Reconnect: refresh status from daemon
         if let Some(status) = ipc_client::get_status() {
-            *CACHED_STATUS.lock().unwrap() = Some(status);
-            platform::dispatch_to_main(refresh_tray);
+            if let Some(tx) = STATUS_TX.get() {
+                let _ = tx.send_blocking(status);
+            }
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
 
+/// Parse a StatusResponse from a subscribe event line.
+fn parse_status_event(data: &str) -> Option<ipc_client::StatusResponse> {
+    let event: serde_json::Value = serde_json::from_str(data).ok()?;
+    // Try {"event":"status","data":{...}} format
+    if let Some(status_data) = event.get("data") {
+        return serde_json::from_value(status_data.clone()).ok();
+    }
+    // Try direct {"status":"connected",...} format
+    serde_json::from_value(event).ok()
+}
+
 // ── Tray update functions ────────────────────────────────────────────────────
 
-/// Read cached status (no IPC call — safe during network changes).
 fn get_cached_connected() -> bool {
     CACHED_STATUS
         .lock()
@@ -136,7 +142,6 @@ fn get_cached_connected() -> bool {
         .unwrap_or(false)
 }
 
-/// Update tray icon from cache (no IPC calls).
 fn refresh_icon() {
     let is_connected = get_cached_connected();
 
@@ -155,7 +160,6 @@ fn refresh_icon() {
     }
 }
 
-/// Rebuild tray menu AND update icon (no IPC calls — uses cache + fresh profile fetch).
 fn refresh_tray() {
     refresh_icon();
     if let Ok(guard) = TRAY.lock() {
@@ -184,7 +188,6 @@ fn handle_menu_event(id: &str) {
                         platform::show_notification("Connection Failed", &r.message);
                     }
                 }
-                // Update cache and tray immediately
                 if let Some(status) = ipc_client::get_status() {
                     *CACHED_STATUS.lock().unwrap() = Some(status);
                 }
@@ -207,7 +210,7 @@ fn handle_menu_event(id: &str) {
         }
         refresh_tray();
     } else if id == "settings" {
-        platform::dispatch_to_main(open_settings_window);
+        open_settings_window();
     } else if id == "quit" {
         if let Some(s) = ipc_client::get_status() {
             if s.status == "connected" {
@@ -235,7 +238,6 @@ fn build_tray_menu() -> Menu {
 
     let profiles = ipc_client::get_profiles();
 
-    // Use cached status (no IPC call — safe from PostMessageW handler)
     let cached = CACHED_STATUS.lock().ok().and_then(|g| g.clone());
     let is_connected = cached
         .as_ref()
