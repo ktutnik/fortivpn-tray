@@ -8,25 +8,29 @@ mod settings;
 
 use std::sync::Mutex;
 
-use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use trayicon::{Icon, MenuBuilder, TrayIcon, TrayIconBuilder};
 
-// TrayIcon is !Sync, but we only access it from the main thread
-struct TrayHolder(TrayIcon);
-unsafe impl Send for TrayHolder {}
-unsafe impl Sync for TrayHolder {}
+/// Tray menu events — must be Send + Sync + Clone + PartialEq
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayEvent {
+    Connect(usize),    // profile index
+    Disconnect(usize), // profile index
+    Settings,
+    Quit,
+}
 
-static TRAY: Mutex<Option<TrayHolder>> = Mutex::new(None);
+static TRAY: Mutex<Option<TrayIcon<TrayEvent>>> = Mutex::new(None);
+
 struct AppHolder(gpui::AsyncApp);
 unsafe impl Send for AppHolder {}
 unsafe impl Sync for AppHolder {}
 
 static GPUI_APP: Mutex<Option<AppHolder>> = Mutex::new(None);
 
-/// Cached VPN status — updated by subscribe thread + async channel, read by tray refresh.
+/// Cached VPN status — updated by subscribe thread + async channel.
 static CACHED_STATUS: Mutex<Option<ipc_client::StatusResponse>> = Mutex::new(None);
 
-/// Cached profiles — refreshed on subscribe reconnect and after user actions.
+/// Cached profiles.
 static CACHED_PROFILES: Mutex<Vec<ipc_client::VpnProfile>> = Mutex::new(Vec::new());
 
 /// Channel sender for subscribe thread → GPUI main thread.
@@ -59,58 +63,75 @@ fn main() {
         platform::create_keepalive_window(cx);
         platform::hide_from_dock(cx);
 
-        // Fetch initial status and profiles BEFORE building menu
+        // Fetch initial status and profiles
         if let Some(status) = ipc_client::get_status() {
             *CACHED_STATUS.lock().unwrap() = Some(status);
         }
         *CACHED_PROFILES.lock().unwrap() = ipc_client::get_profiles();
 
-        // Build tray icon
-        let icon = load_icon(include_bytes!("../../../icons/vpn-disconnected.png"))
-            .expect("load tray icon");
+        // Build tray icon with trayicon crate (Send + Sync, no RefCell)
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
         let menu = build_tray_menu();
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_icon(icon)
-            .with_icon_as_template(true)
-            .with_tooltip("FortiVPN Tray")
-            .build()
-            .expect("Failed to build tray icon");
 
-        *TRAY.lock().unwrap() = Some(TrayHolder(tray));
+        let mut builder = TrayIconBuilder::new()
+            .icon_from_buffer(include_bytes!("../../../icons/vpn-disconnected.png"))
+            .tooltip("FortiVPN Tray")
+            .menu(menu)
+            .sender(move |event: &TrayEvent| {
+                let _ = event_tx.send(*event);
+            });
 
-        // Menu event handler — safe to call set_menu() here (muda borrow is released)
-        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-            let id = event.id().as_ref().to_string();
-            handle_menu_event(&id);
-        }));
+        // macOS: use template icon for menu bar
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(mut icon) = Icon::from_buffer(
+                include_bytes!("../../../icons/vpn-disconnected.png"),
+                None,
+                None,
+            ) {
+                icon.set_template(true);
+                builder = builder.icon(icon);
+            }
+        }
 
-        // NO TrayIconEvent handler — calling set_menu() from it causes muda RefCell panic
+        let tray = builder.build().expect("Failed to build tray icon");
+        *TRAY.lock().unwrap() = Some(tray);
 
-        // Async channel: subscribe thread sends status, GPUI spawn receives and updates icon.
-        // ONLY refresh_icon() (set_icon) from spawn — NEVER set_menu() (muda RefCell crash).
-        let (tx, rx) = async_channel::unbounded();
-        STATUS_TX.set(tx).ok();
+        // Async channel: subscribe thread → GPUI spawn → update cache + tray
+        let (status_tx, status_rx) = async_channel::unbounded();
+        STATUS_TX.set(status_tx).ok();
 
+        // GPUI spawn: receive status updates and refresh tray.
+        // trayicon is Send+Sync so set_icon/set_menu is safe from any context.
         cx.spawn(async move |_cx| {
-            log("spawn", "GPUI icon listener started");
-            while let Ok(status) = rx.recv().await {
-                log("spawn", &format!("Status update: {}", status.status));
+            log("spawn", "Status listener started");
+            while let Ok(status) = status_rx.recv().await {
+                log("spawn", &format!("Status: {}", status.status));
                 *CACHED_STATUS.lock().unwrap() = Some(status);
-                // ONLY update icon — set_icon() is safe (tray-icon RefCell, not muda RefCell)
-                // NEVER call set_menu() here — it triggers muda RefCell double borrow
-                refresh_icon();
-                log("spawn", "Icon updated");
+                refresh_tray();
+                log("spawn", "Tray refreshed");
             }
         })
         .detach();
 
-        // Subscribe to daemon events in background thread
+        // Poll menu events from trayicon's mpsc channel
+        // (trayicon uses callback → mpsc, we poll from GPUI timer)
+        cx.spawn(async move |cx| loop {
+            while let Ok(event) = event_rx.try_recv() {
+                handle_tray_event(event);
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+        })
+        .detach();
+
+        // Subscribe to daemon events
         std::thread::spawn(|| {
             subscribe_loop();
         });
 
-        log("app", "App initialized, entering event loop");
+        log("app", "App initialized");
     });
 }
 
@@ -118,7 +139,6 @@ fn main() {
 fn subscribe_loop() {
     log("subscribe", "Subscribe loop started");
     loop {
-        log("subscribe", "Connecting to daemon subscribe...");
         if let Some(reader) = ipc_client::subscribe() {
             log("subscribe", "Connected");
             use std::io::BufRead;
@@ -138,7 +158,6 @@ fn subscribe_loop() {
                     }
                 }
             }
-            log("subscribe", "Connection lost");
         }
         // Reconnect: refresh profiles
         if let Some(status) = ipc_client::get_status() {
@@ -159,111 +178,102 @@ fn parse_status_event(data: &str) -> Option<ipc_client::StatusResponse> {
     serde_json::from_value(event).ok()
 }
 
-// ── Tray update functions ────────────────────────────────────────────────────
+// ── Tray update ──────────────────────────────────────────────────────────────
 
-fn get_cached_connected() -> bool {
-    CACHED_STATUS
+fn refresh_tray() {
+    let is_connected = CACHED_STATUS
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|s| s.status == "connected"))
-        .unwrap_or(false)
-}
+        .unwrap_or(false);
 
-/// Update ONLY the tray icon. Safe from GPUI spawn (no muda RefCell involved).
-fn refresh_icon() {
-    let is_connected = get_cached_connected();
-    let icon_bytes = if is_connected {
-        include_bytes!("../../../icons/vpn-connected.png").as_slice()
-    } else {
-        include_bytes!("../../../icons/vpn-disconnected.png").as_slice()
-    };
-
-    if let Ok(guard) = TRAY.lock() {
-        if let Some(holder) = guard.as_ref() {
-            if let Ok(icon) = load_icon(icon_bytes) {
-                platform::set_tray_icon(&holder.0, icon);
-            }
-        }
-    }
-}
-
-/// Rebuild icon AND menu. ONLY call from MenuEvent handler (muda borrow released).
-fn refresh_tray() {
-    refresh_icon();
-    if let Ok(guard) = TRAY.lock() {
-        if let Some(holder) = guard.as_ref() {
-            let menu = build_tray_menu();
-            holder.0.set_menu(Some(Box::new(menu)));
-        }
-    }
-}
-
-// ── Menu event handling ──────────────────────────────────────────────────────
-
-fn handle_menu_event(id: &str) {
-    if let Some(profile_name) = id.strip_prefix("connect:") {
-        let profiles = CACHED_PROFILES.lock().unwrap().clone();
-        if let Some(profile) = profiles.iter().find(|p| p.name == profile_name) {
-            if let Some(password) = keychain::read_password(&profile.id) {
-                let resp = ipc_client::connect_with_password(&profile.name, &password);
-                if let Some(r) = &resp {
-                    if r.ok {
-                        platform::show_notification(
-                            "FortiVPN Connected",
-                            &format!("Connected to {}", profile.name),
-                        );
-                    } else {
-                        platform::show_notification("Connection Failed", &r.message);
-                    }
-                }
-                if let Some(status) = ipc_client::get_status() {
-                    *CACHED_STATUS.lock().unwrap() = Some(status);
-                }
-                refresh_tray();
+    if let Ok(mut guard) = TRAY.lock() {
+        if let Some(tray) = guard.as_mut() {
+            // Update icon
+            let icon_bytes: &'static [u8] = if is_connected {
+                include_bytes!("../../../icons/vpn-connected.png")
             } else {
-                platform::show_notification(
-                    "No Password",
-                    &format!(
-                        "Set password for {} using CLI: fortivpn set-password",
-                        profile_name
-                    ),
-                );
-            }
-        }
-    } else if id.starts_with("disconnect:") {
-        ipc_client::disconnect_vpn();
-        platform::show_notification("FortiVPN Disconnected", "VPN connection closed");
-        if let Some(status) = ipc_client::get_status() {
-            *CACHED_STATUS.lock().unwrap() = Some(status);
-        }
-        refresh_tray();
-    } else if id == "settings" {
-        open_settings_window();
-    } else if id == "quit" {
-        if let Some(s) = ipc_client::get_status() {
-            if s.status == "connected" {
-                ipc_client::disconnect_vpn();
-            }
-        }
-        std::process::exit(0);
-    }
-}
+                include_bytes!("../../../icons/vpn-disconnected.png")
+            };
 
-fn open_settings_window() {
-    if let Ok(guard) = GPUI_APP.lock() {
-        if let Some(holder) = guard.as_ref() {
-            let _ = holder.0.update(|cx| {
-                settings::open_settings(cx);
-            });
+            if let Ok(mut icon) = Icon::from_buffer(icon_bytes, None, None) {
+                #[cfg(target_os = "macos")]
+                icon.set_template(true);
+                let _ = tray.set_icon(&icon);
+            }
+
+            // Update menu
+            let menu = build_tray_menu();
+            let _ = tray.set_menu(&menu);
         }
     }
 }
 
-// ── Tray menu building ───────────────────────────────────────────────────────
+// ── Event handling ───────────────────────────────────────────────────────────
 
-fn build_tray_menu() -> Menu {
-    let menu = Menu::new();
+fn handle_tray_event(event: TrayEvent) {
+    match event {
+        TrayEvent::Connect(index) => {
+            let profiles = CACHED_PROFILES.lock().unwrap().clone();
+            if let Some(profile) = profiles.get(index) {
+                if let Some(password) = keychain::read_password(&profile.id) {
+                    let resp = ipc_client::connect_with_password(&profile.name, &password);
+                    if let Some(r) = &resp {
+                        if r.ok {
+                            platform::show_notification(
+                                "FortiVPN Connected",
+                                &format!("Connected to {}", profile.name),
+                            );
+                        } else {
+                            platform::show_notification("Connection Failed", &r.message);
+                        }
+                    }
+                    if let Some(status) = ipc_client::get_status() {
+                        *CACHED_STATUS.lock().unwrap() = Some(status);
+                    }
+                    refresh_tray();
+                } else {
+                    platform::show_notification(
+                        "No Password",
+                        &format!(
+                            "Set password for {} using CLI: fortivpn set-password",
+                            profile.name
+                        ),
+                    );
+                }
+            }
+        }
+        TrayEvent::Disconnect(_) => {
+            ipc_client::disconnect_vpn();
+            platform::show_notification("FortiVPN Disconnected", "VPN connection closed");
+            if let Some(status) = ipc_client::get_status() {
+                *CACHED_STATUS.lock().unwrap() = Some(status);
+            }
+            refresh_tray();
+        }
+        TrayEvent::Settings => {
+            if let Ok(guard) = GPUI_APP.lock() {
+                if let Some(holder) = guard.as_ref() {
+                    let _ = holder.0.update(|cx| {
+                        settings::open_settings(cx);
+                    });
+                }
+            }
+        }
+        TrayEvent::Quit => {
+            if let Some(s) = ipc_client::get_status() {
+                if s.status == "connected" {
+                    ipc_client::disconnect_vpn();
+                }
+            }
+            std::process::exit(0);
+        }
+    }
+}
 
+// ── Menu building ────────────────────────────────────────────────────────────
+
+fn build_tray_menu() -> MenuBuilder<TrayEvent> {
     let profiles = CACHED_PROFILES.lock().unwrap().clone();
     let cached = CACHED_STATUS.lock().ok().and_then(|g| g.clone());
     let is_connected = cached
@@ -277,47 +287,33 @@ fn build_tray_menu() -> Menu {
             .unwrap_or(false);
     let connected_name = cached.as_ref().and_then(|s| s.profile.clone());
 
-    for profile in &profiles {
+    let mut menu = MenuBuilder::new();
+
+    for (i, profile) in profiles.iter().enumerate() {
         let this_connected = is_connected && connected_name.as_deref() == Some(&profile.name);
         if this_connected {
-            let _ = menu.append(&MenuItem::with_id(
-                format!("disconnect:{}", profile.name),
-                format!("\u{25CF} {} \u{2014} Disconnect", profile.name),
-                true,
-                None::<muda::accelerator::Accelerator>,
-            ));
+            menu = menu.item(
+                &format!("\u{25CF} {} \u{2014} Disconnect", profile.name),
+                TrayEvent::Disconnect(i),
+            );
         } else {
-            let _ = menu.append(&MenuItem::with_id(
-                format!("connect:{}", profile.name),
-                format!("\u{25CB} {} \u{2014} Connect", profile.name),
-                !is_busy,
-                None::<muda::accelerator::Accelerator>,
-            ));
+            // trayicon doesn't support disabled items directly via .item()
+            // Use MenuItem::Item with disabled flag for busy state
+            menu = menu.with(trayicon::MenuItem::Item {
+                id: TrayEvent::Connect(i),
+                name: format!("\u{25CB} {} \u{2014} Connect", profile.name),
+                disabled: is_busy,
+                icon: None,
+            });
         }
     }
 
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&MenuItem::with_id(
-        "settings",
-        "Settings...",
-        true,
-        None::<muda::accelerator::Accelerator>,
-    ));
-    let _ = menu.append(&MenuItem::with_id(
-        "quit",
-        "Quit",
-        true,
-        None::<muda::accelerator::Accelerator>,
-    ));
+    menu = menu
+        .separator()
+        .item("Settings...", TrayEvent::Settings)
+        .item("Quit", TrayEvent::Quit);
 
     menu
-}
-
-fn load_icon(bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
-    let img = image::load_from_memory(bytes)?;
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    Ok(Icon::from_rgba(rgba.into_raw(), w, h)?)
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────

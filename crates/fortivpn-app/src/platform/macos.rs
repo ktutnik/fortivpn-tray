@@ -29,12 +29,6 @@ pub fn show_notification(title: &str, body: &str) {
         .args(["-e", &script])
         .spawn();
 }
-
-/// Set the tray icon with template mode enabled (macOS renders as template image).
-pub fn set_tray_icon(tray: &tray_icon::TrayIcon, icon: tray_icon::Icon) {
-    let _ = tray.set_icon_with_as_template(Some(icon), true);
-}
-
 /// No-op on macOS — GPUI stays alive without a hidden window.
 pub fn create_keepalive_window(_cx: &mut gpui::App) {}
 

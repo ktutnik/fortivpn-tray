@@ -35,12 +35,6 @@ pub fn show_notification(title: &str, body: &str) {
         .body(body)
         .show();
 }
-
-/// Set the tray icon (no template mode on Windows).
-pub fn set_tray_icon(tray: &tray_icon::TrayIcon, icon: tray_icon::Icon) {
-    let _ = tray.set_icon(Some(icon));
-}
-
 /// Create a hidden window to keep the GPUI event loop alive on Windows.
 pub fn create_keepalive_window(cx: &mut gpui::App) {
     use gpui::{px, AppContext};
