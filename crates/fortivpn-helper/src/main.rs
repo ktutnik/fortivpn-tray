@@ -16,17 +16,8 @@
 
 #[cfg(unix)]
 mod commands;
+mod platform;
 
-#[cfg(unix)]
-mod unix_main;
-
-#[cfg(unix)]
 fn main() {
-    unix_main::run();
-}
-
-#[cfg(windows)]
-fn main() {
-    eprintln!("fortivpn-helper is not supported on Windows");
-    std::process::exit(1);
+    platform::run();
 }

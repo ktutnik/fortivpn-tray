@@ -1,147 +1,19 @@
 //! First-launch detection and helper daemon installation.
 
-#[cfg(target_os = "macos")]
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::process::Command;
-
-#[cfg(target_os = "macos")]
-const HELPER_SOCKET: &str = "/var/run/fortivpn-helper.sock";
-#[cfg(target_os = "macos")]
-const HELPER_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/fortivpn-helper";
-#[cfg(target_os = "macos")]
-const PLIST_INSTALL_PATH: &str = "/Library/LaunchDaemons/com.fortivpn-tray.helper.plist";
+use crate::platform;
 
 /// Check if the helper daemon is installed and reachable.
-#[cfg(target_os = "macos")]
 pub fn is_helper_installed() -> bool {
-    std::os::unix::net::UnixStream::connect(HELPER_SOCKET).is_ok()
-        || Path::new(PLIST_INSTALL_PATH).exists()
+    platform::is_helper_installed()
 }
 
 /// Check if the installed helper needs upgrading.
-#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub fn needs_upgrade(bundled_version: &str) -> bool {
-    match fortivpn::helper::HelperClient::connect() {
-        Ok(mut client) => match client.version() {
-            Ok(installed) => installed != bundled_version,
-            Err(_) => true,
-        },
-        Err(_) => false,
-    }
+    platform::needs_upgrade(bundled_version)
 }
 
 /// Install or upgrade the helper daemon. Prompts for admin password once.
-#[cfg(target_os = "macos")]
 pub fn install_helper() -> Result<(), String> {
-    let helper_src = find_bundled_helper()?;
-    let plist_src = find_bundled_plist()?;
-
-    let script = format!(
-        r#"do shell script "
-            mkdir -p /Library/PrivilegedHelperTools && \
-            cp '{}' '{}' && \
-            chmod 755 '{}' && \
-            chown root:wheel '{}' && \
-            cp '{}' '{}' && \
-            chown root:wheel '{}' && \
-            launchctl bootout system '{}' 2>/dev/null; \
-            launchctl bootstrap system '{}'
-        " with administrator privileges"#,
-        helper_src.replace('\'', "'\\''"),
-        HELPER_INSTALL_PATH,
-        HELPER_INSTALL_PATH,
-        HELPER_INSTALL_PATH,
-        plist_src.replace('\'', "'\\''"),
-        PLIST_INSTALL_PATH,
-        PLIST_INSTALL_PATH,
-        PLIST_INSTALL_PATH,
-        PLIST_INSTALL_PATH,
-    );
-
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map_err(|e| format!("Failed to run installer: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("User canceled") || stderr.contains("(-128)") {
-            return Err("Installation cancelled by user".to_string());
-        }
-        return Err(format!("Installation failed: {stderr}"));
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn find_bundled_helper() -> Result<String, String> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            // .app bundle: Contents/MacOS/../Resources/
-            if let Some(parent) = dir.parent() {
-                let rd = parent.join("Resources");
-                for name in &[
-                    "fortivpn-helper",
-                    "fortivpn-helper-aarch64-apple-darwin",
-                    "fortivpn-helper-x86_64-apple-darwin",
-                ] {
-                    let path = rd.join(name);
-                    if path.exists() {
-                        return Ok(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-            // Next to executable (dev builds)
-            let path = dir.join("fortivpn-helper");
-            if path.exists() {
-                return Ok(path.to_string_lossy().to_string());
-            }
-        }
-    }
-    Err("Bundled helper binary not found".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn find_bundled_plist() -> Result<String, String> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(parent) = dir.parent() {
-                let path = parent
-                    .join("Resources")
-                    .join("com.fortivpn-tray.helper.plist");
-                if path.exists() {
-                    return Ok(path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    // Dev: relative to working directory
-    let path = std::path::Path::new("resources/com.fortivpn-tray.helper.plist");
-    if path.exists() {
-        return Ok(path.to_string_lossy().to_string());
-    }
-    Err("Bundled plist not found".to_string())
-}
-
-#[cfg(target_os = "windows")]
-pub fn is_helper_installed() -> bool {
-    true // No helper on Windows
-}
-
-#[cfg(target_os = "windows")]
-pub fn install_helper() -> Result<(), String> {
-    Ok(()) // No helper needed
-}
-
-#[cfg(target_os = "linux")]
-pub fn is_helper_installed() -> bool {
-    false // TODO
-}
-
-#[cfg(target_os = "linux")]
-pub fn install_helper() -> Result<(), String> {
-    Err("Linux helper installation not yet implemented".to_string())
+    platform::install_helper()
 }

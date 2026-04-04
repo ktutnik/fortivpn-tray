@@ -33,7 +33,7 @@ mod launchd {
 
 const IDLE_TIMEOUT_SECS: u64 = 30;
 
-pub fn run() {
+pub fn run() -> ! {
     match launchd::activate_socket("Listeners") {
         Ok(fds) if !fds.is_empty() => {
             use std::os::unix::io::FromRawFd;
@@ -56,6 +56,7 @@ pub fn run() {
             handle_client(stream);
         }
     }
+    std::process::exit(0);
 }
 
 fn run_accept_loop(listener: std::os::unix::net::UnixListener) {

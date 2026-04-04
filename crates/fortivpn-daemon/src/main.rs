@@ -4,33 +4,15 @@
 mod installer;
 mod ipc;
 mod notification;
+mod platform;
 mod profile;
 mod vpn;
 
 use std::sync::{Arc, Mutex};
 
-fn init_logger() {
-    // macOS: unified logging (Console.app, `log stream`)
-    #[cfg(target_os = "macos")]
-    {
-        oslog::OsLogger::new("com.fortivpn-tray")
-            .level_filter(log::LevelFilter::Info)
-            .category_level_filter("ipc", log::LevelFilter::Debug)
-            .category_level_filter("vpn", log::LevelFilter::Debug)
-            .init()
-            .ok();
-    }
-
-    // Linux/Windows: env_logger (stderr, RUST_LOG env var)
-    #[cfg(not(target_os = "macos"))]
-    {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
-}
-
 #[tokio::main]
 async fn main() {
-    init_logger();
+    platform::init_logger();
 
     // Install rustls CryptoProvider (required since multiple providers may be available)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
