@@ -73,25 +73,15 @@ fn main() {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let menu = build_tray_menu();
 
+        let icon = make_tray_icon(include_bytes!("../../../icons/vpn-disconnected.png"));
         let mut builder = TrayIconBuilder::new()
-            .icon_from_buffer(include_bytes!("../../../icons/vpn-disconnected.png"))
             .tooltip("FortiVPN Tray")
             .menu(menu)
             .sender(move |event: &TrayEvent| {
                 let _ = event_tx.send(*event);
             });
-
-        // macOS: use template icon for menu bar
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(mut icon) = Icon::from_buffer(
-                include_bytes!("../../../icons/vpn-disconnected.png"),
-                None,
-                None,
-            ) {
-                icon.set_template(true);
-                builder = builder.icon(icon);
-            }
+        if let Ok(icon) = icon {
+            builder = builder.icon(icon);
         }
 
         let tray = builder.build().expect("Failed to build tray icon");
@@ -196,9 +186,7 @@ fn refresh_tray() {
                 include_bytes!("../../../icons/vpn-disconnected.png")
             };
 
-            if let Ok(mut icon) = Icon::from_buffer(icon_bytes, None, None) {
-                #[cfg(target_os = "macos")]
-                icon.set_template(true);
+            if let Ok(icon) = make_tray_icon(icon_bytes) {
                 let _ = tray.set_icon(&icon);
             }
 
@@ -314,6 +302,22 @@ fn build_tray_menu() -> MenuBuilder<TrayEvent> {
         .item("Quit", TrayEvent::Quit);
 
     menu
+}
+
+/// Create a tray icon with correct sizing for each platform.
+/// macOS: 22x22 points (44px Retina), template mode for menu bar.
+/// Windows/Linux: use native size.
+fn make_tray_icon(buffer: &'static [u8]) -> Result<Icon, trayicon::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut icon = Icon::from_buffer(buffer, Some(22), Some(22))?;
+        icon.set_template(true);
+        Ok(icon)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Icon::from_buffer(buffer, None, None)
+    }
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
