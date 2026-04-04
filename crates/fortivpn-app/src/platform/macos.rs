@@ -37,3 +37,26 @@ pub fn set_tray_icon(tray: &tray_icon::TrayIcon, icon: tray_icon::Icon) {
 
 /// No-op on macOS — GPUI stays alive without a hidden window.
 pub fn create_keepalive_window(_cx: &mut gpui::App) {}
+
+/// Dispatch a function to the main thread via GCD.
+pub fn dispatch_to_main(f: fn()) {
+    use std::ffi::c_void;
+    extern "C" {
+        fn dispatch_async_f(
+            queue: *const c_void,
+            context: *mut c_void,
+            work: extern "C" fn(*mut c_void),
+        );
+        static _dispatch_main_q: c_void;
+    }
+
+    extern "C" fn trampoline(ctx: *mut c_void) {
+        let f: fn() = unsafe { std::mem::transmute(ctx) };
+        f();
+    }
+
+    unsafe {
+        let main_q = &raw const _dispatch_main_q;
+        dispatch_async_f(main_q, f as *mut c_void, trampoline);
+    }
+}
