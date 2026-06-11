@@ -95,8 +95,11 @@ fn main() {
         // trayicon is Send+Sync so set_icon/set_menu is safe from any context.
         cx.spawn(async move |_cx| {
             log("spawn", "Status listener started");
+            let mut prev_status = String::new();
             while let Ok(status) = status_rx.recv().await {
                 log("spawn", &format!("Status: {}", status.status));
+                notify_status_transition(&prev_status, &status);
+                prev_status = status.status.clone();
                 *CACHED_STATUS.lock().unwrap() = Some(status);
                 refresh_tray();
                 log("spawn", "Tray refreshed");
@@ -157,6 +160,29 @@ fn subscribe_loop() {
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+/// Show a desktop notification for daemon-driven status changes (drops,
+/// reconnects). Manual connect/disconnect notifications are handled in
+/// handle_tray_event, so only transitions away from an established session
+/// are reported here.
+fn notify_status_transition(prev: &str, status: &ipc_client::StatusResponse) {
+    let new = status.status.as_str();
+    if new == prev {
+        return;
+    }
+    if new == "reconnecting" {
+        let profile = status.profile.as_deref().unwrap_or("VPN");
+        platform::show_notification(
+            "FortiVPN Connection Lost",
+            &format!("Reconnecting to {profile}…"),
+        );
+    } else if new == "connected" && prev == "reconnecting" {
+        let profile = status.profile.as_deref().unwrap_or("VPN");
+        platform::show_notification("FortiVPN Reconnected", &format!("Connected to {profile}"));
+    } else if new.starts_with("error") && (prev == "connected" || prev == "reconnecting") {
+        platform::show_notification("FortiVPN Disconnected", new);
     }
 }
 
@@ -271,7 +297,11 @@ fn build_tray_menu() -> MenuBuilder<TrayEvent> {
     let is_busy = is_connected
         || cached
             .as_ref()
-            .map(|s| s.status == "connecting" || s.status == "disconnecting")
+            .map(|s| {
+                s.status == "connecting"
+                    || s.status == "disconnecting"
+                    || s.status == "reconnecting"
+            })
             .unwrap_or(false);
     let connected_name = cached.as_ref().and_then(|s| s.profile.clone());
 

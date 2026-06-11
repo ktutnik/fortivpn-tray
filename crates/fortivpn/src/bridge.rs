@@ -386,7 +386,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     magic_number: u32,
     event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
 ) {
-    let mut echo_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut echo_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
     let mut echo_id: u8 = 0;
     let mut missed_echoes: u8 = 0;
 
@@ -406,7 +406,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     break;
                 }
                 missed_echoes = missed_echoes.saturating_add(1);
-                if missed_echoes > 3 {
+                if missed_echoes >= 3 {
                     alive.store(false, Ordering::Relaxed);
                     let _ = event_tx.send(crate::VpnEvent::Died("LCP echo timeout — connection lost".to_string()));
                     break;

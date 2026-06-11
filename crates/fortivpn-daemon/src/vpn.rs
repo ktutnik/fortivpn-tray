@@ -10,6 +10,7 @@ pub enum VpnStatus {
     Connecting,
     Connected,
     Disconnecting,
+    Reconnecting,
     Error(String),
 }
 
@@ -87,6 +88,10 @@ impl VpnManager {
 
         self.session = Some(session);
         self.connected_profile_id = Some(profile.id.clone());
+        // Retain the password in memory for the session so the monitor can
+        // auto-reconnect after an unexpected drop. Cleared on disconnect.
+        self.session_passwords
+            .insert(profile.id.clone(), password.to_string());
         self.status = VpnStatus::Connected;
         Ok(())
     }
@@ -111,17 +116,20 @@ impl VpnManager {
 
     /// Handle session death detected by the event monitor.
     /// Unlike disconnect(), this does NOT abort the monitor (caller IS the monitor).
-    pub async fn handle_session_death(&mut self, reason: String) {
+    /// Returns the (profile_id, password) of the dead session so the caller can
+    /// attempt an auto-reconnect.
+    pub async fn handle_session_death(&mut self, reason: String) -> Option<(String, String)> {
         if let Some(ref mut session) = self.session {
             session.disconnect(self.helper.as_mut()).await;
         }
         self.session = None;
-        if let Some(ref id) = self.connected_profile_id {
-            self.session_passwords.remove(id);
-        }
-        self.connected_profile_id = None;
+        let reconnect_info = self
+            .connected_profile_id
+            .take()
+            .and_then(|id| self.session_passwords.remove(&id).map(|pw| (id, pw)));
         self.status = VpnStatus::Error(reason);
         self.monitor_handle = None;
+        reconnect_info
     }
 
     pub async fn disconnect(&mut self) -> Result<(), String> {
@@ -382,6 +390,32 @@ mod tests {
         );
         assert!(manager.connected_profile_id.is_none());
         assert!(manager.session.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_death_returns_reconnect_info() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+        manager.connected_profile_id = Some("p1".to_string());
+        manager
+            .session_passwords
+            .insert("p1".to_string(), "secret".to_string());
+
+        let info = manager.handle_session_death("link down".to_string()).await;
+
+        assert_eq!(info, Some(("p1".to_string(), "secret".to_string())));
+        assert!(manager.session_passwords.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_death_no_password_returns_none() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+        manager.connected_profile_id = Some("p1".to_string());
+
+        let info = manager.handle_session_death("link down".to_string()).await;
+
+        assert_eq!(info, None);
     }
 
     #[tokio::test]

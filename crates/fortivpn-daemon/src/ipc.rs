@@ -107,6 +107,113 @@ async fn handle_subscribe(
     }
 }
 
+const RECONNECT_MAX_ATTEMPTS: u32 = 5;
+const RECONNECT_BASE_DELAY_SECS: u64 = 3;
+
+/// Watch a session's event channel; on death, tear down and auto-reconnect.
+/// Re-arms itself after a successful reconnect. Delays back off exponentially
+/// (3s, 6s, 12s, 24s, 48s). A manual connect/disconnect during the backoff
+/// window changes the status away from Reconnecting, which aborts the loop.
+fn spawn_session_monitor(
+    state: AppState,
+    mut event_rx: tokio::sync::watch::Receiver<fortivpn::VpnEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let reason = loop {
+            match event_rx.changed().await {
+                Ok(()) => {
+                    let event = event_rx.borrow().clone();
+                    if let fortivpn::VpnEvent::Died(ref r) = event {
+                        break r.clone();
+                    }
+                }
+                Err(_) => break "Connection lost".to_string(),
+            }
+        };
+        log::warn!(target: "vpn", "Session died: {reason}");
+
+        let reconnect_info = {
+            let mut vpn = state.vpn.lock().await;
+            let info = vpn.handle_session_death(reason.clone()).await;
+            if info.is_some() {
+                vpn.status = VpnStatus::Reconnecting;
+            }
+            info
+        };
+
+        let profile = reconnect_info.as_ref().and_then(|(id, _)| {
+            let store = state.store.lock().unwrap();
+            store.get(id).cloned()
+        });
+
+        let (Some((_, password)), Some(profile)) = (reconnect_info, profile) else {
+            crate::notification::send_notification("FortiVPN Disconnected", &reason);
+            let _ = state.status_tx.send(
+                serde_json::json!({"event":"status","data":{"status":format!("error: {reason}"),"profile":null}}).to_string()
+            );
+            return;
+        };
+
+        let _ = state.status_tx.send(
+            serde_json::json!({"event":"status","data":{"status":"reconnecting","profile":profile.name}}).to_string()
+        );
+
+        for attempt in 1..=RECONNECT_MAX_ATTEMPTS {
+            let delay = RECONNECT_BASE_DELAY_SECS * 2u64.pow(attempt - 1);
+            tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+
+            let result = {
+                let mut vpn = state.vpn.lock().await;
+                // User connected/disconnected manually during the backoff — stand down.
+                if vpn.status != VpnStatus::Reconnecting {
+                    return;
+                }
+                vpn.connect_with_password(&profile, &password).await
+            };
+
+            match result {
+                Ok(()) => {
+                    {
+                        let mut vpn = state.vpn.lock().await;
+                        if let Some(ref mut session) = vpn.session {
+                            if let Some(rx) = session.take_event_rx() {
+                                vpn.monitor_handle = Some(spawn_session_monitor(state.clone(), rx));
+                            }
+                        }
+                    }
+                    log::info!(target: "vpn", "Reconnected after {attempt} attempt(s)");
+                    let _ = state.status_tx.send(
+                        serde_json::json!({"event":"status","data":{"status":"connected","profile":profile.name}}).to_string()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::warn!(target: "vpn", "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} failed: {e}");
+                    let mut vpn = state.vpn.lock().await;
+                    // connect_with_password leaves status at Error on failure;
+                    // restore Reconnecting unless the user intervened meanwhile.
+                    if matches!(vpn.status, VpnStatus::Error(_)) && attempt < RECONNECT_MAX_ATTEMPTS
+                    {
+                        vpn.status = VpnStatus::Reconnecting;
+                    }
+                }
+            }
+        }
+
+        {
+            let mut vpn = state.vpn.lock().await;
+            if vpn.status == VpnStatus::Reconnecting || matches!(vpn.status, VpnStatus::Error(_)) {
+                vpn.status = VpnStatus::Error(format!("Reconnect failed: {reason}"));
+            }
+        }
+        log::error!(target: "vpn", "Gave up reconnecting after {RECONNECT_MAX_ATTEMPTS} attempts");
+        crate::notification::send_notification("FortiVPN Disconnected", &reason);
+        let _ = state.status_tx.send(
+            serde_json::json!({"event":"status","data":{"status":format!("error: reconnect failed — {reason}"),"profile":null}}).to_string()
+        );
+    })
+}
+
 async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     let command = parts[0];
@@ -130,6 +237,7 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
                     ("connected".to_string(), name)
                 }
                 VpnStatus::Disconnecting => ("disconnecting".to_string(), None),
+                VpnStatus::Reconnecting => ("reconnecting".to_string(), None),
                 VpnStatus::Error(e) => (format!("error: {e}"), None),
             };
 
@@ -226,38 +334,12 @@ async fn handle_ipc_command(state: &AppState, cmd: &str) -> IpcResponse {
 
             match result {
                 Ok(()) => {
-                    let st = state.clone();
                     {
                         let mut vpn = state.vpn.lock().await;
                         if let Some(ref mut session) = vpn.session {
                             if let Some(event_rx) = session.take_event_rx() {
-                                let handle = tokio::spawn(async move {
-                                    let mut rx = event_rx;
-                                    let reason = loop {
-                                        match rx.changed().await {
-                                            Ok(()) => {
-                                                let event = rx.borrow().clone();
-                                                if let fortivpn::VpnEvent::Died(ref r) = event {
-                                                    break r.clone();
-                                                }
-                                            }
-                                            Err(_) => break "Connection lost".to_string(),
-                                        }
-                                    };
-                                    log::warn!(target: "vpn", "Session died: {reason}");
-                                    {
-                                        let mut vpn = st.vpn.lock().await;
-                                        vpn.handle_session_death(reason.clone()).await;
-                                    }
-                                    crate::notification::send_notification(
-                                        "FortiVPN Disconnected",
-                                        &reason,
-                                    );
-                                    let _ = st.status_tx.send(
-                                        serde_json::json!({"event":"status","data":{"status":format!("error: {reason}"),"profile":null}}).to_string()
-                                    );
-                                });
-                                vpn.monitor_handle = Some(handle);
+                                vpn.monitor_handle =
+                                    Some(spawn_session_monitor(state.clone(), event_rx));
                             }
                         }
                     }
