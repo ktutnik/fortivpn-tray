@@ -45,8 +45,10 @@ case "$OS" in
         cp -r "${BUNDLE_DIR}" /Applications/
 
         echo ""
-        echo "Installing privileged helper (requires admin password)..."
+        echo "Installing CLI and privileged helper (requires admin password)..."
         sudo bash -c "
+        cp target/release/fortivpn /usr/local/bin/fortivpn &&
+        chmod 755 /usr/local/bin/fortivpn &&
         cp target/release/fortivpn-helper /Library/PrivilegedHelperTools/fortivpn-helper &&
         chmod 755 /Library/PrivilegedHelperTools/fortivpn-helper &&
         chown root:wheel /Library/PrivilegedHelperTools/fortivpn-helper &&
