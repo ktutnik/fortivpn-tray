@@ -422,6 +422,13 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                     }
                 };
 
+                // Any inbound frame proves the link is alive — data packets, the
+                // server's own LCP echo-requests, and empty keepalive frames all
+                // count. Many FortiGate gateways never reply to client-initiated
+                // echo-requests, so relying solely on Echo-Reply falsely kills a
+                // healthy, actively-used tunnel (~30s after connect → reconnect loop).
+                missed_echoes = 0;
+
                 if frame.len() < 4 {
                     continue; // skip empty/too-short frames
                 }
@@ -444,37 +451,35 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                             let _ = tun_writer.write_all(ip_data).await;
                         }
                     }
-                    LCP_PROTOCOL => {
-                        if frame.len() >= 6 {
-                            let code = frame[2];
-                            let id = frame[3];
-                            match code {
-                                LCP_ECHO_REQUEST => {
-                                    let reply = PppPacket {
-                                        protocol: LCP_PROTOCOL,
-                                        code: LCP_ECHO_REPLY,
-                                        identifier: id,
-                                        data: magic_number.to_be_bytes().to_vec(),
-                                    };
-                                    let _ = outbound_tx.send(reply.encode()).await;
-                                }
-                                LCP_ECHO_REPLY => {
-                                    missed_echoes = 0;
-                                }
-                                LCP_TERMINATE_REQUEST => {
-                                    let ack = PppPacket {
-                                        protocol: LCP_PROTOCOL,
-                                        code: LCP_TERMINATE_ACK,
-                                        identifier: id,
-                                        data: vec![],
-                                    };
-                                    let _ = outbound_tx.send(ack.encode()).await;
-                                    alive.store(false, Ordering::Relaxed);
-                                    let _ = event_tx.send(crate::VpnEvent::Died("Server terminated connection".to_string()));
-                                    break;
-                                }
-                                _ => {}
+                    LCP_PROTOCOL if frame.len() >= 6 => {
+                        let code = frame[2];
+                        let id = frame[3];
+                        match code {
+                            LCP_ECHO_REQUEST => {
+                                let reply = PppPacket {
+                                    protocol: LCP_PROTOCOL,
+                                    code: LCP_ECHO_REPLY,
+                                    identifier: id,
+                                    data: magic_number.to_be_bytes().to_vec(),
+                                };
+                                let _ = outbound_tx.send(reply.encode()).await;
                             }
+                            LCP_ECHO_REPLY => {
+                                missed_echoes = 0;
+                            }
+                            LCP_TERMINATE_REQUEST => {
+                                let ack = PppPacket {
+                                    protocol: LCP_PROTOCOL,
+                                    code: LCP_TERMINATE_ACK,
+                                    identifier: id,
+                                    data: vec![],
+                                };
+                                let _ = outbound_tx.send(ack.encode()).await;
+                                alive.store(false, Ordering::Relaxed);
+                                let _ = event_tx.send(crate::VpnEvent::Died("Server terminated connection".to_string()));
+                                break;
+                            }
+                            _ => {}
                         }
                     }
                     _ => {} // ignore other protocols
