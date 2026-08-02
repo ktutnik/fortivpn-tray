@@ -1,7 +1,7 @@
 use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::process::Command;
 use std::task::{Context, Poll};
@@ -318,6 +318,50 @@ impl AsyncWrite for AsyncTunFd {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
+}
+
+// ── TunKeeper ───────────────────────────────────────────────────────────────
+
+/// A spare, unregistered copy of the TUN file descriptor.
+///
+/// The kernel destroys a tun interface — and with it every route bound to that
+/// interface — as soon as its last descriptor closes. The bridge tasks own the
+/// descriptor they read and write, so a dying tunnel takes the interface down
+/// with it. Holding this second copy keeps the interface, its routes and its DNS
+/// configuration alive across a reconnect.
+pub struct TunKeeper {
+    fd: OwnedFd,
+    name: String,
+}
+
+impl TunKeeper {
+    /// Duplicate the descriptor of a freshly created TUN device.
+    pub fn from_handle(handle: &TunHandle) -> io::Result<Self> {
+        let fd = dup_fd(handle.0)?;
+        Ok(Self {
+            fd,
+            name: handle.1.clone(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Open a fresh async handle on the same interface, for a new bridge.
+    pub fn open_async(&self) -> io::Result<AsyncTunFd> {
+        let fd = dup_fd(self.fd.as_raw_fd())?;
+        // AsyncTunFd::new takes ownership of the raw fd it is given.
+        AsyncTunFd::new(fd.into_raw_fd())
+    }
+}
+
+fn dup_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    let duped = unsafe { libc::dup(fd) };
+    if duped < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(duped) })
 }
 
 // ── Routing ─────────────────────────────────────────────────────────────────

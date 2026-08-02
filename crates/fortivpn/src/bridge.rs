@@ -1,5 +1,5 @@
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
@@ -9,8 +9,106 @@ use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
 
 use crate::ppp::*;
-use crate::tunnel::{read_frame, write_frame};
+use crate::tunnel::{encode_frame_into, read_frame, write_frame, FrameReader};
 use crate::FortiError;
+
+/// How often the client sends an LCP echo request.
+const ECHO_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Echo intervals allowed to pass with no inbound frame at all before the link
+/// is declared dead. Any inbound frame resets the counter, so this only ever
+/// expires on a genuinely silent tunnel.
+const MAX_MISSED_ECHOES: u8 = 6;
+
+/// Packets coalesced into a single TLS write. Bounded so a flood cannot grow the
+/// scratch buffer without limit or stall the shutdown branch.
+const WRITE_BATCH_LIMIT: usize = 32;
+
+/// How often the tunnel reports its vitals while healthy.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Live counters for one tunnel.
+///
+/// A drop is diagnosed from what the tunnel was doing in the minute before it
+/// died, not from the death itself — "silent for 60s then killed" and "died
+/// mid-transfer at 2 MB/s" have completely different causes and used to produce
+/// the identical message.
+#[derive(Debug)]
+pub struct BridgeStats {
+    start: std::time::Instant,
+    pub frames_in: AtomicU64,
+    pub frames_out: AtomicU64,
+    pub bytes_in: AtomicU64,
+    pub bytes_out: AtomicU64,
+    pub echoes_sent: AtomicU64,
+    pub echo_replies: AtomicU64,
+    /// Milliseconds since `start` when the last inbound frame arrived.
+    pub last_inbound_ms: AtomicU64,
+}
+
+impl Default for BridgeStats {
+    fn default() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            frames_in: AtomicU64::new(0),
+            frames_out: AtomicU64::new(0),
+            bytes_in: AtomicU64::new(0),
+            bytes_out: AtomicU64::new(0),
+            echoes_sent: AtomicU64::new(0),
+            echo_replies: AtomicU64::new(0),
+            last_inbound_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl BridgeStats {
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    fn mark_inbound(&self, bytes: usize) {
+        self.frames_in.fetch_add(1, Ordering::Relaxed);
+        self.bytes_in.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.last_inbound_ms
+            .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// How long since anything at all arrived from the gateway.
+    pub fn since_last_inbound(&self) -> std::time::Duration {
+        let last = self.last_inbound_ms.load(Ordering::Relaxed);
+        self.start
+            .elapsed()
+            .saturating_sub(std::time::Duration::from_millis(last))
+    }
+
+    /// One-line vitals for the log.
+    pub fn summary(&self) -> String {
+        format!(
+            "up {:.0}s | in {} frames/{} KB | out {} frames/{} KB | echo {} sent/{} replied | last inbound {:.1}s ago",
+            self.uptime().as_secs_f64(),
+            self.frames_in.load(Ordering::Relaxed),
+            self.bytes_in.load(Ordering::Relaxed) / 1024,
+            self.frames_out.load(Ordering::Relaxed),
+            self.bytes_out.load(Ordering::Relaxed) / 1024,
+            self.echoes_sent.load(Ordering::Relaxed),
+            self.echo_replies.load(Ordering::Relaxed),
+            self.since_last_inbound().as_secs_f64(),
+        )
+    }
+}
+
+/// Record a tunnel death: log the cause together with the vitals that led to it,
+/// then notify the session monitor.
+fn declare_dead(
+    reason: String,
+    stats: &BridgeStats,
+    alive: &AtomicBool,
+    event_tx: &tokio::sync::watch::Sender<crate::VpnEvent>,
+) {
+    alive.store(false, Ordering::Relaxed);
+    log::warn!(target: "vpn", "Tunnel died: {reason} | {}", stats.summary());
+    let _ = event_tx.send(crate::VpnEvent::Died(reason));
+}
 
 /// macOS utun packet information header for IPv4 (AF_INET = 2).
 #[cfg(target_os = "macos")]
@@ -149,12 +247,19 @@ pub async fn open_tunnel(
     Ok(())
 }
 
+/// What PPP negotiation settled on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PppSession {
+    pub assigned_ip: Ipv4Addr,
+    pub magic_number: u32,
+    pub dns_servers: Vec<Ipv4Addr>,
+    /// MTU the gateway agreed to, for the TUN device.
+    pub mtu: u16,
+}
+
 /// Run PPP negotiation (LCP + IPCP) over the tunnel.
-/// Returns the negotiated IP and DNS servers.
-pub async fn negotiate_ppp<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<(Ipv4Addr, u32, Vec<Ipv4Addr>), FortiError>
+/// Returns the negotiated IP, DNS servers and MTU.
+pub async fn negotiate_ppp<R, W>(reader: &mut R, writer: &mut W) -> Result<PppSession, FortiError>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
@@ -280,7 +385,12 @@ where
         dns_servers.push(ipcp.secondary_dns);
     }
 
-    Ok((ipcp.local_ip, lcp.magic_number, dns_servers))
+    Ok(PppSession {
+        assigned_ip: ipcp.local_ip,
+        magic_number: lcp.magic_number,
+        dns_servers,
+        mtu: lcp.negotiated_mtu(),
+    })
 }
 
 /// The result of starting the bridge — contains handles for cleanup.
@@ -288,6 +398,7 @@ pub struct BridgeHandle {
     pub tasks: Vec<JoinHandle<()>>,
     pub alive: Arc<AtomicBool>,
     pub event_rx: tokio::sync::watch::Receiver<crate::VpnEvent>,
+    pub stats: Arc<BridgeStats>,
 }
 
 /// Start the bidirectional bridge between TLS tunnel and tun device.
@@ -299,6 +410,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
     magic_number: u32,
 ) -> BridgeHandle {
     let alive = Arc::new(AtomicBool::new(true));
+    let stats = Arc::new(BridgeStats::default());
     let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
     let event_tx = Arc::new(event_tx);
     let (tls_reader, tls_writer) = split(tls_stream);
@@ -310,8 +422,9 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         let shutdown = shutdown.clone();
         let alive = alive.clone();
         let event_tx = event_tx.clone();
+        let stats = stats.clone();
         tokio::spawn(async move {
-            tunnel_writer_loop(tls_writer, outbound_rx, shutdown, alive, event_tx).await;
+            tunnel_writer_loop(tls_writer, outbound_rx, shutdown, alive, event_tx, stats).await;
         })
     };
 
@@ -321,6 +434,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         let alive = alive.clone();
         let outbound_tx = outbound_tx.clone();
         let event_tx = event_tx.clone();
+        let stats = stats.clone();
         tokio::spawn(async move {
             tunnel_reader_loop(
                 tls_reader,
@@ -330,6 +444,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
                 alive,
                 magic_number,
                 event_tx,
+                stats,
             )
             .await;
         })
@@ -344,10 +459,42 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         })
     };
 
+    // Task 4: Heartbeat — periodic vitals so the run-up to a drop is on record,
+    // not just the drop itself.
+    let heartbeat_task = {
+        let shutdown = shutdown.clone();
+        let alive = alive.clone();
+        let stats = stats.clone();
+        tokio::spawn(async move {
+            heartbeat_loop(shutdown, alive, stats).await;
+        })
+    };
+
     BridgeHandle {
-        tasks: vec![tunnel_writer_task, tunnel_reader_task, tun_reader_task],
+        tasks: vec![
+            tunnel_writer_task,
+            tunnel_reader_task,
+            tun_reader_task,
+            heartbeat_task,
+        ],
         alive,
         event_rx,
+        stats,
+    }
+}
+
+async fn heartbeat_loop(shutdown: Arc<Notify>, alive: Arc<AtomicBool>, stats: Arc<BridgeStats>) {
+    let mut timer = echo_timer(HEARTBEAT_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = shutdown.notified() => break,
+            _ = timer.tick() => {
+                if !alive.load(Ordering::Relaxed) {
+                    break;
+                }
+                log::info!(target: "vpn", "Tunnel healthy | {}", stats.summary());
+            }
+        }
     }
 }
 
@@ -357,38 +504,78 @@ async fn tunnel_writer_loop<W: AsyncWriteExt + Unpin>(
     shutdown: Arc<Notify>,
     alive: Arc<AtomicBool>,
     event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
+    stats: Arc<BridgeStats>,
 ) {
+    // Drain whatever has queued up into one buffer, then one write and one
+    // flush. Writing per packet meant a TLS record and a syscall each — with
+    // TCP_NODELAY set, zero coalescing on a burst.
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(WRITE_BATCH_LIMIT);
+    let mut out: Vec<u8> = Vec::with_capacity(WRITE_BATCH_LIMIT * 1500);
+
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
-            msg = rx.recv() => {
-                match msg {
-                    Some(payload) => {
-                        if write_frame(&mut writer, &payload).await.is_err() {
-                            alive.store(false, Ordering::Relaxed);
-                            let _ = event_tx.send(crate::VpnEvent::Died("TLS write error".to_string()));
-                            break;
-                        }
-                    }
-                    None => break, // channel closed
+            count = rx.recv_many(&mut batch, WRITE_BATCH_LIMIT) => {
+                if count == 0 {
+                    break; // channel closed
                 }
+
+                out.clear();
+                let mut frames = 0u64;
+                for payload in batch.drain(..) {
+                    encode_frame_into(&mut out, &payload);
+                    frames += 1;
+                }
+
+                // Keep the real cause: "broken pipe" and "connection reset by peer"
+                // point at different failures and used to collapse to one string.
+                if let Err(e) = writer.write_all(&out).await.and(writer.flush().await) {
+                    declare_dead(
+                        format!("TLS write error: {} ({:?})", e, e.kind()),
+                        &stats,
+                        &alive,
+                        &event_tx,
+                    );
+                    break;
+                }
+
+                stats.frames_out.fetch_add(frames, Ordering::Relaxed);
+                stats.bytes_out.fetch_add(out.len() as u64, Ordering::Relaxed);
             }
         }
     }
 }
 
+/// Build the LCP echo timer.
+///
+/// `tokio::time::interval` fires its first tick immediately, which counted as a
+/// missed echo the instant the bridge started — so a quiet tunnel on a gateway
+/// that ignores client echo requests was killed at t=20s. Start one full period
+/// out, and never bunch up ticks to "catch up" after the loop was busy.
+fn echo_timer(period: std::time::Duration) -> tokio::time::Interval {
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    timer
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    mut reader: R,
+    reader: R,
     mut tun_writer: W,
     outbound_tx: mpsc::Sender<Vec<u8>>,
     shutdown: Arc<Notify>,
     alive: Arc<AtomicBool>,
     magic_number: u32,
     event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
+    stats: Arc<BridgeStats>,
 ) {
-    let mut echo_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    let mut echo_interval = echo_timer(ECHO_INTERVAL);
     let mut echo_id: u8 = 0;
     let mut missed_echoes: u8 = 0;
+
+    // Cancel-safe: the echo timer and shutdown branches below can drop the read
+    // future mid-frame, and FrameReader resumes instead of losing the bytes.
+    let mut frames = FrameReader::new(reader);
 
     loop {
         tokio::select! {
@@ -405,22 +592,39 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 if outbound_tx.send(echo.encode()).await.is_err() {
                     break;
                 }
+                stats.echoes_sent.fetch_add(1, Ordering::Relaxed);
                 missed_echoes = missed_echoes.saturating_add(1);
-                if missed_echoes >= 3 {
-                    alive.store(false, Ordering::Relaxed);
-                    let _ = event_tx.send(crate::VpnEvent::Died("LCP echo timeout — connection lost".to_string()));
+                if missed_echoes >= MAX_MISSED_ECHOES {
+                    declare_dead(
+                        format!(
+                            "LCP echo timeout — nothing received for {:.0}s over {missed_echoes} echo intervals",
+                            stats.since_last_inbound().as_secs_f64()
+                        ),
+                        &stats,
+                        &alive,
+                        &event_tx,
+                    );
                     break;
                 }
             }
-            frame = read_frame(&mut reader) => {
+            frame = frames.next_frame() => {
                 let frame = match frame {
                     Ok(f) => f,
-                    Err(_) => {
-                        alive.store(false, Ordering::Relaxed);
-                        let _ = event_tx.send(crate::VpnEvent::Died("TLS tunnel read error".to_string()));
+                    Err(e) => {
+                        // FrameReader distinguishes a clean close ("tunnel closed")
+                        // from a reset, a timeout and a framing desync. Collapsing
+                        // them into one string is what made drops untraceable.
+                        declare_dead(
+                            format!("Tunnel read failed: {e}"),
+                            &stats,
+                            &alive,
+                            &event_tx,
+                        );
                         break;
                     }
                 };
+
+                stats.mark_inbound(frame.len());
 
                 // Any inbound frame proves the link is alive — data packets, the
                 // server's own LCP echo-requests, and empty keepalive frames all
@@ -465,6 +669,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                 let _ = outbound_tx.send(reply.encode()).await;
                             }
                             LCP_ECHO_REPLY => {
+                                stats.echo_replies.fetch_add(1, Ordering::Relaxed);
                                 missed_echoes = 0;
                             }
                             LCP_TERMINATE_REQUEST => {
@@ -475,8 +680,12 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                     data: vec![],
                                 };
                                 let _ = outbound_tx.send(ack.encode()).await;
-                                alive.store(false, Ordering::Relaxed);
-                                let _ = event_tx.send(crate::VpnEvent::Died("Server terminated connection".to_string()));
+                                declare_dead(
+                                    "Server sent LCP Terminate-Request".to_string(),
+                                    &stats,
+                                    &alive,
+                                    &event_tx,
+                                );
                                 break;
                             }
                             _ => {}
@@ -532,8 +741,49 @@ async fn tun_reader_loop<R: AsyncReadExt + Unpin>(
 mod tests {
     use super::*;
     use crate::tunnel::{read_frame, write_frame};
+
     use std::sync::atomic::Ordering;
     use tokio::sync::{mpsc, Notify};
+
+    #[tokio::test]
+    async fn test_echo_timer_first_tick_is_not_immediate() {
+        // tokio::time::interval fires immediately, which counted as a missed echo
+        // at t=0 and killed an idle tunnel three ticks later.
+        let period = std::time::Duration::from_millis(80);
+        let mut timer = echo_timer(period);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), timer.tick())
+                .await
+                .is_err(),
+            "first echo tick fired immediately"
+        );
+        let started = std::time::Instant::now();
+        timer.tick().await;
+        assert!(
+            started.elapsed() < period,
+            "first tick came a period too late"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_echo_timer_ticks_on_period() {
+        let period = std::time::Duration::from_millis(40);
+        let mut timer = echo_timer(period);
+        timer.tick().await;
+        let started = std::time::Instant::now();
+        timer.tick().await;
+        // Half a period, not a full one: timer granularity makes an exact
+        // comparison flaky, and the point here is only that it waited.
+        assert!(started.elapsed() >= period / 2);
+    }
+
+    #[test]
+    fn test_missed_echo_budget_outlasts_a_slow_gateway() {
+        // Any inbound frame resets the counter, so this budget only expires on a
+        // tunnel that is completely silent. Keep it well clear of the old ~20s.
+        let silence = ECHO_INTERVAL * u32::from(MAX_MISSED_ECHOES);
+        assert!(silence >= std::time::Duration::from_secs(60));
+    }
 
     #[tokio::test]
     async fn test_tunnel_writer_loop_sends_frames() {
@@ -550,7 +800,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
+            tunnel_writer_loop(
+                client_writer,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
         });
 
         // Send some data through the channel
@@ -564,6 +822,135 @@ mod tests {
         assert_eq!(frame2, b"world");
 
         // Shutdown
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+    }
+
+    /// Wraps a writer and counts how many `poll_write` calls reach it.
+    struct CountingWriter<W> {
+        inner: W,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountingWriter<W> {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_writer_loop_coalesces_a_burst_into_one_write() {
+        // The point of batching: a queued burst must reach the socket as one
+        // write, not one per packet. Previously this was 20 writes and 20 flushes.
+        let (client, server) = tokio::io::duplex(65536);
+        let (_, client_writer) = tokio::io::split(client);
+        let (mut server_reader, _) = tokio::io::split(server);
+
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = CountingWriter {
+            inner: client_writer,
+            writes: writes.clone(),
+        };
+
+        let shutdown = Arc::new(Notify::new());
+        let alive = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
+
+        // Queue everything before the writer task exists, so recv_many sees a
+        // full backlog rather than one message at a time.
+        let payloads: Vec<Vec<u8>> = (0..20u8).map(|i| vec![i; 100 + i as usize]).collect();
+        for p in &payloads {
+            tx.send(p.clone()).await.unwrap();
+        }
+
+        let shutdown_clone = shutdown.clone();
+        let alive_clone = alive.clone();
+        let handle = tokio::spawn(async move {
+            tunnel_writer_loop(
+                counting,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
+        });
+
+        for expected in &payloads {
+            let frame = read_frame(&mut server_reader).await.unwrap();
+            assert_eq!(&frame, expected);
+        }
+
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+
+        let n = writes.load(Ordering::Relaxed);
+        assert!(
+            n < payloads.len(),
+            "expected the burst to coalesce, got {n} writes for {} packets",
+            payloads.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_writer_loop_handles_burst_over_batch_limit() {
+        // More packets than fit in one batch must still all arrive, in order.
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (_, client_writer) = tokio::io::split(client);
+        let (mut server_reader, _) = tokio::io::split(server);
+
+        let shutdown = Arc::new(Notify::new());
+        let alive = Arc::new(AtomicBool::new(true));
+        let count = WRITE_BATCH_LIMIT * 3 + 7;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(count);
+        let (event_tx, _event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+        let event_tx = Arc::new(event_tx);
+
+        for i in 0..count {
+            tx.send(vec![(i % 251) as u8; 64]).await.unwrap();
+        }
+
+        let shutdown_clone = shutdown.clone();
+        let alive_clone = alive.clone();
+        let handle = tokio::spawn(async move {
+            tunnel_writer_loop(
+                client_writer,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
+        });
+
+        for i in 0..count {
+            let frame = read_frame(&mut server_reader).await.unwrap();
+            assert_eq!(frame, vec![(i % 251) as u8; 64], "frame {i} corrupted");
+        }
+
         shutdown.notify_waiters();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
     }
@@ -582,7 +969,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
+            tunnel_writer_loop(
+                client_writer,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
         });
 
         // Yield to let the spawned task reach the select! loop
@@ -609,7 +1004,15 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let alive_clone = alive.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
+            tunnel_writer_loop(
+                client_writer,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
         });
 
         // Drop sender to close channel
@@ -645,6 +1048,7 @@ mod tests {
                 alive_clone,
                 0x12345678,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -707,6 +1111,7 @@ mod tests {
                 alive_clone,
                 magic,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -754,7 +1159,15 @@ mod tests {
         let alive_clone = alive.clone();
         let shutdown_clone = shutdown.clone();
         let handle = tokio::spawn(async move {
-            tunnel_writer_loop(client_writer, rx, shutdown_clone, alive_clone, event_tx).await;
+            tunnel_writer_loop(
+                client_writer,
+                rx,
+                shutdown_clone,
+                alive_clone,
+                event_tx,
+                Arc::new(BridgeStats::default()),
+            )
+            .await;
         });
 
         // Send data - write should fail because server end is dropped
@@ -826,6 +1239,7 @@ mod tests {
                 alive_clone,
                 0x11111111,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -877,6 +1291,7 @@ mod tests {
                 alive_clone,
                 0x11111111,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -932,6 +1347,7 @@ mod tests {
                 alive_clone,
                 0x11111111,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -975,6 +1391,7 @@ mod tests {
                 alive_clone,
                 0x11111111,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });
@@ -1089,6 +1506,7 @@ mod tests {
                 alive_clone,
                 0x11111111,
                 event_tx,
+                Arc::new(BridgeStats::default()),
             )
             .await;
         });

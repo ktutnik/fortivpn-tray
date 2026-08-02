@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use fortivpn::tunnel::{
-    decode_frame_header, encode_frame, read_frame, write_frame, HEADER_SIZE, MAGIC,
+    decode_frame_header, encode_frame, read_frame, write_frame, FrameReader, HEADER_SIZE, MAGIC,
 };
+use tokio::io::AsyncWriteExt;
 
 // === encode_frame tests ===
 
@@ -168,4 +171,111 @@ async fn test_write_read_roundtrip() {
         let result = read_frame(&mut reader).await.unwrap();
         assert_eq!(&result, p);
     }
+}
+
+// === FrameReader (cancel-safe) tests ===
+
+#[tokio::test]
+async fn test_frame_reader_reads_sequential_frames() {
+    let mut buf = Vec::new();
+    write_frame(&mut buf, b"first").await.unwrap();
+    write_frame(&mut buf, b"second").await.unwrap();
+    write_frame(&mut buf, b"").await.unwrap();
+
+    let mut frames = FrameReader::new(&buf[..]);
+    assert_eq!(frames.next_frame().await.unwrap(), b"first");
+    assert_eq!(frames.next_frame().await.unwrap(), b"second");
+    assert!(frames.next_frame().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_frame_reader_resumes_after_cancellation_mid_frame() {
+    // The bug this guards: the reader future is dropped after the 6-byte header
+    // has been consumed but before the payload arrives. A non-cancel-safe reader
+    // loses those header bytes and reads payload as a header on the next call —
+    // magic check fails, tunnel torn down.
+    let (mut client, server) = tokio::io::duplex(64);
+    let mut frames = FrameReader::new(server);
+
+    let frame = encode_frame(b"payload");
+    client.write_all(&frame[..HEADER_SIZE]).await.unwrap();
+
+    // Header is available, payload is not — this call must time out mid-frame.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), frames.next_frame())
+            .await
+            .is_err(),
+        "expected the read to still be waiting for the payload"
+    );
+
+    client.write_all(&frame[HEADER_SIZE..]).await.unwrap();
+    assert_eq!(frames.next_frame().await.unwrap(), b"payload");
+}
+
+#[tokio::test]
+async fn test_frame_reader_resumes_after_cancellation_mid_header() {
+    let (mut client, server) = tokio::io::duplex(64);
+    let mut frames = FrameReader::new(server);
+
+    let frame = encode_frame(b"hi");
+    client.write_all(&frame[..3]).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), frames.next_frame())
+            .await
+            .is_err()
+    );
+
+    client.write_all(&frame[3..]).await.unwrap();
+    assert_eq!(frames.next_frame().await.unwrap(), b"hi");
+}
+
+#[tokio::test]
+async fn test_frame_reader_survives_repeated_cancellation() {
+    // One byte at a time, cancelled between every single byte.
+    let (mut client, server) = tokio::io::duplex(64);
+    let mut frames = FrameReader::new(server);
+
+    let frame = encode_frame(b"abcd");
+    for byte in &frame[..frame.len() - 1] {
+        client.write_all(&[*byte]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), frames.next_frame())
+                .await
+                .is_err()
+        );
+    }
+    client.write_all(&frame[frame.len() - 1..]).await.unwrap();
+    assert_eq!(frames.next_frame().await.unwrap(), b"abcd");
+}
+
+#[tokio::test]
+async fn test_frame_reader_bad_magic_errors() {
+    let bad = [0u8, 5, 0xAA, 0xAA, 0, 0];
+    let mut frames = FrameReader::new(&bad[..]);
+    assert!(frames.next_frame().await.is_err());
+}
+
+#[tokio::test]
+async fn test_frame_reader_closed_tunnel_errors() {
+    let (client, server) = tokio::io::duplex(64);
+    drop(client);
+    let mut frames = FrameReader::new(server);
+    assert!(frames.next_frame().await.is_err());
+}
+
+#[tokio::test]
+async fn test_frame_reader_handles_large_payload_split_across_reads() {
+    let payload = vec![0x5Au8; 1500];
+    let frame = encode_frame(&payload);
+    let (mut client, server) = tokio::io::duplex(64);
+
+    let writer = tokio::spawn(async move {
+        for chunk in frame.chunks(37) {
+            client.write_all(chunk).await.unwrap();
+        }
+    });
+
+    let mut frames = FrameReader::new(server);
+    assert_eq!(frames.next_frame().await.unwrap(), payload);
+    writer.await.unwrap();
 }

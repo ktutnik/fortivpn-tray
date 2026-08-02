@@ -546,3 +546,60 @@ fn test_ipcp_option_constants() {
     assert_eq!(IPCP_OPT_PRIMARY_DNS, 129);
     assert_eq!(IPCP_OPT_SECONDARY_DNS, 131);
 }
+
+// === Negotiated MTU tests ===
+
+#[test]
+fn test_negotiated_mtu_defaults_when_gateway_states_nothing() {
+    let lcp = LcpState::new();
+    assert_eq!(lcp.peer_mru, None);
+    assert_eq!(lcp.negotiated_mtu(), DEFAULT_MRU);
+}
+
+#[test]
+fn test_configure_request_records_peer_mru() {
+    // The gateway's Configure-Request carries the MRU it will accept — this is
+    // where the TUN MTU should come from instead of a hardcoded 1354.
+    let mut lcp = LcpState::new();
+    let peer_data = LcpOption::Mru(1300).encode();
+    let _ = lcp.handle_configure_request(1, &peer_data);
+    assert_eq!(lcp.peer_mru, Some(1300));
+    assert_eq!(lcp.negotiated_mtu(), 1300);
+}
+
+#[test]
+fn test_negotiated_mtu_takes_the_smaller_of_both_sides() {
+    // Peer allows more than we do — our own MRU still bounds the interface.
+    let mut lcp = LcpState::new();
+    let mut peer_data = LcpOption::Mru(1500).encode();
+    peer_data.extend_from_slice(&LcpOption::MagicNumber(0xAABBCCDD).encode());
+    let _ = lcp.handle_configure_request(1, &peer_data);
+    assert_eq!(lcp.peer_mru, Some(1500));
+    assert_eq!(lcp.negotiated_mtu(), DEFAULT_MRU);
+}
+
+#[test]
+fn test_negotiated_mtu_honours_a_nak_of_our_mru() {
+    let mut lcp = LcpState::new();
+    lcp.handle_configure_nak(&LcpOption::Mru(1200).encode());
+    assert_eq!(lcp.mru, 1200);
+    assert_eq!(lcp.negotiated_mtu(), 1200);
+}
+
+#[test]
+fn test_negotiated_mtu_nak_and_peer_mru_together() {
+    let mut lcp = LcpState::new();
+    let _ = lcp.handle_configure_request(1, &LcpOption::Mru(1300).encode());
+    lcp.handle_configure_nak(&LcpOption::Mru(1280).encode());
+    assert_eq!(lcp.negotiated_mtu(), 1280);
+}
+
+#[test]
+fn test_configure_request_still_records_peer_magic_alongside_mru() {
+    let mut lcp = LcpState::new();
+    let mut peer_data = LcpOption::Mru(1300).encode();
+    peer_data.extend_from_slice(&LcpOption::MagicNumber(0x12345678).encode());
+    let _ = lcp.handle_configure_request(1, &peer_data);
+    assert_eq!(lcp.peer_magic, 0x12345678);
+    assert_eq!(lcp.peer_mru, Some(1300));
+}

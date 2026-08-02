@@ -104,15 +104,15 @@ async fn test_negotiate_ppp_success() {
         assert_eq!(ack_pkt.identifier, 101);
     });
 
-    let (ip, _magic, dns) = negotiate_ppp(&mut client_reader, &mut client_writer)
+    let ppp = negotiate_ppp(&mut client_reader, &mut client_writer)
         .await
         .unwrap();
     server.await.unwrap();
 
-    assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 100));
-    assert_eq!(dns.len(), 2);
-    assert_eq!(dns[0], Ipv4Addr::new(8, 8, 8, 8));
-    assert_eq!(dns[1], Ipv4Addr::new(8, 8, 4, 4));
+    assert_eq!(ppp.assigned_ip, Ipv4Addr::new(10, 0, 0, 100));
+    assert_eq!(ppp.dns_servers.len(), 2);
+    assert_eq!(ppp.dns_servers[0], Ipv4Addr::new(8, 8, 8, 8));
+    assert_eq!(ppp.dns_servers[1], Ipv4Addr::new(8, 8, 4, 4));
 }
 
 /// Test LCP echo handling during negotiation

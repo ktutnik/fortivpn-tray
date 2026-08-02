@@ -88,6 +88,54 @@ pub enum VpnEvent {
     Died(String),
 }
 
+/// Network state kept installed across a reconnect.
+///
+/// Tearing routes and DNS down on every dropped tunnel is what turns a flap into
+/// a machine-wide outage: the default route disappears, every in-flight TCP
+/// connection on the host dies, and DNS churns — then it is all reinstalled a
+/// few seconds later. Holding this state instead makes a flap a brief stall.
+///
+/// The TUN descriptor is part of it because it has to be: the kernel deletes
+/// every route bound to a tun interface the moment its last descriptor closes,
+/// so keeping the routes means keeping the interface open.
+pub struct PreservedNetwork {
+    tun: platform::TunKeeper,
+    /// Gateway this state was built for. Adopting it against a different gateway
+    /// would inherit a host route pointing at the old one — and could route the
+    /// new tunnel's own traffic into the tunnel.
+    host: String,
+    port: u16,
+    assigned_ip: Ipv4Addr,
+    peer_ip: Ipv4Addr,
+    route_manager: routing::RouteManager,
+}
+
+impl PreservedNetwork {
+    /// Whether this state can be adopted by a session to `host:port` that was
+    /// just assigned `assigned_ip`/`peer_ip`.
+    ///
+    /// The installed routes are tied to all four: they point at that local IP and
+    /// carry a host route to that gateway. Anything else has to be reinstalled
+    /// from scratch.
+    fn matches(&self, host: &str, port: u16, assigned_ip: Ipv4Addr, peer_ip: Ipv4Addr) -> bool {
+        self.host == host
+            && self.port == port
+            && self.assigned_ip == assigned_ip
+            && self.peer_ip == peer_ip
+    }
+
+    /// Tear the preserved state down — restore routes and DNS, close the TUN.
+    ///
+    /// Must be called once the reconnect is abandoned, otherwise the host is
+    /// left with its default route pointing into a tunnel that no longer exists.
+    pub fn release(mut self, mut helper: Option<&mut helper::HelperClient>) {
+        self.route_manager.restore_via_helper(helper.as_deref_mut());
+        if let Some(h) = helper {
+            let _ = h.destroy_tun();
+        }
+    }
+}
+
 /// An active VPN session. Holds the tunnel, tun device, and routing state.
 pub struct VpnSession {
     shutdown: Arc<Notify>,
@@ -99,6 +147,13 @@ pub struct VpnSession {
     port: u16,
     cookie: String,
     trusted_cert: String,
+    /// Spare TUN descriptor, so the interface can outlive this session's bridge.
+    /// `None` on platforms that cannot duplicate the device.
+    tun_keeper: Option<platform::TunKeeper>,
+    assigned_ip: Ipv4Addr,
+    peer_ip: Ipv4Addr,
+    mtu: u16,
+    stats: Arc<bridge::BridgeStats>,
 }
 
 impl VpnSession {
@@ -111,6 +166,48 @@ impl VpnSession {
         trusted_cert: &str,
         helper_client: &mut helper::HelperClient,
     ) -> Result<Self, FortiError> {
+        Self::connect_reusing(
+            host,
+            port,
+            username,
+            password,
+            trusted_cert,
+            helper_client,
+            &mut None,
+        )
+        .await
+    }
+
+    /// Connect, adopting the TUN device and routes left behind by a previous
+    /// session when the gateway hands back the same addressing.
+    ///
+    /// `preserved` is taken only once its fate is decided: adopted on a matching
+    /// reconnect, released when the addressing changed. It is left untouched if
+    /// this attempt fails earlier than that, so the caller can retry with the
+    /// routes still in place.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_reusing(
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+        trusted_cert: &str,
+        helper_client: &mut helper::HelperClient,
+        preserved: &mut Option<PreservedNetwork>,
+    ) -> Result<Self, FortiError> {
+        // Every phase is timed and logged. When a connect fails, the last phase
+        // on record is the one that failed — previously the caller got a single
+        // error string with no indication of how far it had got.
+        let t0 = std::time::Instant::now();
+        let mut mark = t0;
+        let mut phase = |name: &str| {
+            let ms = mark.elapsed().as_millis();
+            mark = std::time::Instant::now();
+            log::info!(target: "vpn", "connect[{host}:{port}] {name} in {ms} ms");
+        };
+
+        log::info!(target: "vpn", "connect[{host}:{port}] starting as {username}");
+
         // Phase 1: Authenticate (sync TLS in blocking task)
         let (cookie, config) = tokio::task::spawn_blocking({
             let host = host.to_string();
@@ -120,50 +217,116 @@ impl VpnSession {
             move || auth::authenticate(&host, port, &username, &password, &trusted_cert)
         })
         .await
-        .map_err(|e| FortiError::Io(std::io::Error::other(e)))??;
+        .map_err(|e| FortiError::Io(std::io::Error::other(e)))?
+        .inspect_err(
+            |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in auth: {e}"),
+        )?;
+        phase("auth ok");
 
         // Phase 2: Open async TLS tunnel
-        let mut tls_stream = bridge::async_tls_connect(host, port, trusted_cert).await?;
-        bridge::open_tunnel(&mut tls_stream, host, port, &cookie).await?;
+        let mut tls_stream = bridge::async_tls_connect(host, port, trusted_cert)
+            .await
+            .inspect_err(
+                |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in tls_connect: {e}"),
+            )?;
+        phase("tls connected");
+
+        bridge::open_tunnel(&mut tls_stream, host, port, &cookie)
+            .await
+            .inspect_err(
+                |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in open_tunnel: {e}"),
+            )?;
+        phase("tunnel opened");
 
         // Phase 3: PPP negotiation
         let (mut tls_reader, mut tls_writer) = tokio::io::split(tls_stream);
-        let (assigned_ip, magic_number, _ppp_dns) =
-            bridge::negotiate_ppp(&mut tls_reader, &mut tls_writer).await?;
+        let ppp = bridge::negotiate_ppp(&mut tls_reader, &mut tls_writer)
+            .await
+            .inspect_err(
+                |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in ppp: {e}"),
+            )?;
+        phase(&format!(
+            "ppp negotiated (ip {}, mtu {})",
+            ppp.assigned_ip, ppp.mtu
+        ));
 
         // Reassemble TLS stream from halves
         let tls_stream = tls_reader.unsplit(tls_writer);
 
         // Use PPP-negotiated IP if different from XML config
-        let final_ip = if !assigned_ip.is_unspecified() {
-            assigned_ip
+        let final_ip = if !ppp.assigned_ip.is_unspecified() {
+            ppp.assigned_ip
         } else {
             config.assigned_ip
         };
 
-        // Phase 4: Create tun device via privileged helper
-        let tun_handle = helper_client.create_tun(final_ip, config.peer_ip, 1354)?;
-        let tun_name = tun_handle.1.clone();
-        let tun_dev = platform::AsyncTunFd::from_handle(tun_handle)
-            .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
+        // Phase 4: Adopt the previous TUN device, or create a new one.
+        // Adoption is only safe when the gateway assigned the same addressing —
+        // the installed routes point at that exact local IP.
+        let can_reuse = preserved
+            .as_ref()
+            .is_some_and(|p| p.matches(host, port, final_ip, config.peer_ip));
+
+        let (tun_dev, tun_keeper, route_manager) = if can_reuse {
+            let p = preserved.take().expect("checked by can_reuse");
+            let tun_dev = p
+                .tun
+                .open_async()
+                .map_err(|e| FortiError::TunDeviceError(format!("Reopen tun: {e}")))
+                .inspect_err(|e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED reopening preserved tun: {e}"))?;
+            phase("adopted preserved tun and routes");
+            (tun_dev, Some(p.tun), p.route_manager)
+        } else {
+            // Addressing changed (or nothing to adopt) — drop the stale routes
+            // and TUN before installing fresh ones.
+            if let Some(p) = preserved.take() {
+                p.release(Some(helper_client));
+            }
+            let tun_handle = helper_client
+                .create_tun(final_ip, config.peer_ip, ppp.mtu)
+                .inspect_err(|e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in create_tun: {e}"))?;
+            let tun_name = tun_handle.1.clone();
+            // Duplicate before the bridge takes ownership; without this copy the
+            // interface dies with the bridge and takes its routes with it.
+            let keeper = platform::TunKeeper::from_handle(&tun_handle).ok();
+            let tun_dev = platform::AsyncTunFd::from_handle(tun_handle)
+                .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
+
+            let gateway_ip = format!("{host}:{port}")
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|a| match a.ip() {
+                    std::net::IpAddr::V4(ip) => ip,
+                    _ => Ipv4Addr::UNSPECIFIED,
+                })
+                .unwrap_or(Ipv4Addr::UNSPECIFIED);
+            phase(&format!("tun {tun_name} created"));
+
+            let mut route_manager = routing::RouteManager::new(gateway_ip, &tun_name);
+            route_manager
+                .configure_via_helper(&config, helper_client)
+                .inspect_err(
+                    |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in routes: {e}"),
+                )?;
+            phase(if config.routes.is_empty() {
+                "routes configured (full tunnel)"
+            } else {
+                "routes configured (split tunnel)"
+            });
+            (tun_dev, keeper, route_manager)
+        };
 
         // Phase 5: Start bridge (tun ↔ tunnel)
         let shutdown = Arc::new(Notify::new());
         let bridge_handle =
-            bridge::start_bridge(tls_stream, tun_dev, shutdown.clone(), magic_number);
-
-        // Phase 6: Configure routes via helper
-        let gateway_ip = format!("{host}:{port}")
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-            .map(|a| match a.ip() {
-                std::net::IpAddr::V4(ip) => ip,
-                _ => Ipv4Addr::UNSPECIFIED,
-            })
-            .unwrap_or(Ipv4Addr::UNSPECIFIED);
-        let mut route_manager = routing::RouteManager::new(gateway_ip, &tun_name);
-        route_manager.configure_via_helper(&config, helper_client)?;
+            bridge::start_bridge(tls_stream, tun_dev, shutdown.clone(), ppp.magic_number);
+        log::info!(
+            target: "vpn",
+            "connect[{host}:{port}] ESTABLISHED in {} ms total (ip {final_ip}, mtu {})",
+            t0.elapsed().as_millis(),
+            ppp.mtu
+        );
 
         Ok(Self {
             shutdown,
@@ -171,11 +334,26 @@ impl VpnSession {
             bridge_tasks: bridge_handle.tasks,
             alive: bridge_handle.alive,
             event_rx: Some(bridge_handle.event_rx),
+            stats: bridge_handle.stats,
             host: host.to_string(),
             port,
             cookie,
             trusted_cert: trusted_cert.to_string(),
+            tun_keeper,
+            assigned_ip: final_ip,
+            peer_ip: config.peer_ip,
+            mtu: ppp.mtu,
         })
+    }
+
+    /// MTU the gateway negotiated for this session's TUN device.
+    pub fn mtu(&self) -> u16 {
+        self.mtu
+    }
+
+    /// Live counters for this session's tunnel.
+    pub fn stats(&self) -> &bridge::BridgeStats {
+        &self.stats
     }
 
     /// Take the event receiver for external monitoring.
@@ -191,13 +369,8 @@ impl VpnSession {
 
     /// Disconnect: stop tunnel, restore routes, send logout.
     pub async fn disconnect(&mut self, mut helper: Option<&mut helper::HelperClient>) {
-        // Signal bridge tasks to stop
-        self.shutdown.notify_waiters();
-
-        // Wait for tasks to finish
-        for task in self.bridge_tasks.drain(..) {
-            let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), task).await;
-        }
+        log::info!(target: "vpn", "Disconnecting {} | {}", self.host, self.stats.summary());
+        self.stop_bridge().await;
 
         // Restore routes via helper
         if let Some(ref mut rm) = self.route_manager {
@@ -205,12 +378,75 @@ impl VpnSession {
         }
         self.route_manager = None;
 
-        // Close the TUN device in the helper to prevent stale utun on reconnect
+        // Close the TUN device — ours and the helper's copy — to prevent a stale
+        // utun on reconnect.
+        self.tun_keeper = None;
         if let Some(ref mut h) = helper {
             let _ = h.destroy_tun();
         }
 
-        // Send logout request (best-effort)
+        self.send_logout().await;
+    }
+
+    /// Stop the tunnel but leave the routes, DNS and TUN device installed, so a
+    /// reconnect can resume without a host-wide route teardown.
+    ///
+    /// Returns the state for the next [`Self::connect_reusing`] to adopt. Returns
+    /// `None` — after a full [`Self::disconnect`] — when this platform cannot
+    /// hold the TUN device open, since routes cannot outlive their interface.
+    pub async fn disconnect_preserving_network(
+        &mut self,
+        helper: Option<&mut helper::HelperClient>,
+    ) -> Option<PreservedNetwork> {
+        if self.tun_keeper.is_none() || self.route_manager.is_none() {
+            // Routes cannot outlive their interface, so with no spare TUN
+            // descriptor there is nothing safe to hold on to — tear it all down.
+            self.disconnect(helper).await;
+            return None;
+        }
+
+        log::info!(
+            target: "vpn",
+            "Stopping tunnel but keeping routes/DNS/TUN for reconnect | {}",
+            self.stats.summary()
+        );
+        self.stop_bridge().await;
+        self.send_logout().await;
+
+        let mut route_manager = self.route_manager.take().expect("checked above");
+        // Route cleanup needs the privileged helper, which Drop cannot reach —
+        // same reason VpnSession::drop skips it. release() is the real path.
+        route_manager.skip_drop_restore();
+
+        Some(PreservedNetwork {
+            tun: self.tun_keeper.take().expect("checked above"),
+            host: self.host.clone(),
+            port: self.port,
+            assigned_ip: self.assigned_ip,
+            peer_ip: self.peer_ip,
+            route_manager,
+        })
+    }
+
+    /// Signal the bridge tasks to stop and wait for them to wind down.
+    ///
+    /// A task that misses the shutdown notification is aborted rather than left
+    /// running: it still owns a TUN descriptor, and the next session may be about
+    /// to adopt that same interface.
+    async fn stop_bridge(&mut self) {
+        self.shutdown.notify_waiters();
+        for mut task in self.bridge_tasks.drain(..) {
+            if tokio::time::timeout(tokio::time::Duration::from_secs(3), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+            }
+        }
+    }
+
+    /// Tell the gateway the session is over (best-effort).
+    async fn send_logout(&self) {
         let host = self.host.clone();
         let port = self.port;
         let cookie = self.cookie.clone();
@@ -253,6 +489,96 @@ fn send_logout(host: &str, port: u16, cookie: &str, trusted_cert: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a PreservedNetwork without touching the network — only the address
+    /// fields matter for the adoption decision.
+    #[cfg(unix)]
+    fn preserved_for(assigned_ip: Ipv4Addr, peer_ip: Ipv4Addr) -> PreservedNetwork {
+        use std::os::fd::AsRawFd;
+        // A socket pair stands in for the tun device: pollable like the real
+        // thing, and never read or written here. from_handle dups the descriptor,
+        // so the pair keeps its own copy.
+        let (sock, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handle: platform::TunHandle = (sock.as_raw_fd(), "utun9".to_string());
+        let tun = platform::TunKeeper::from_handle(&handle).unwrap();
+        let mut route_manager = routing::RouteManager::new(Ipv4Addr::new(1, 2, 3, 4), "utun9");
+        route_manager.skip_drop_restore();
+        PreservedNetwork {
+            tun,
+            host: "vpn.example.com".to_string(),
+            port: 443,
+            assigned_ip,
+            peer_ip,
+            route_manager,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preserved_network_matches_same_addressing() {
+        let p = preserved_for(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 2, 1));
+        assert!(p.matches(
+            "vpn.example.com",
+            443,
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(169, 254, 2, 1)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preserved_network_rejects_new_assigned_ip() {
+        // A different local IP means the installed routes point at the wrong
+        // gateway — they have to be reinstalled, not adopted.
+        let p = preserved_for(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 2, 1));
+        assert!(!p.matches(
+            "vpn.example.com",
+            443,
+            Ipv4Addr::new(10, 0, 0, 6),
+            Ipv4Addr::new(169, 254, 2, 1)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preserved_network_rejects_other_gateway() {
+        // Two profiles can hand out the same private IP. The preserved host route
+        // points at the old gateway, so adopting across gateways would risk
+        // routing the new tunnel's own traffic into the tunnel.
+        let p = preserved_for(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 2, 1));
+        assert!(!p.matches(
+            "other.example.com",
+            443,
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(169, 254, 2, 1)
+        ));
+        assert!(!p.matches(
+            "vpn.example.com",
+            10443,
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(169, 254, 2, 1)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preserved_network_rejects_new_peer_ip() {
+        let p = preserved_for(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 2, 1));
+        assert!(!p.matches(
+            "vpn.example.com",
+            443,
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(169, 254, 2, 9)
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_preserved_network_reopens_tun_handle() {
+        // Adoption depends on the kept descriptor still being usable.
+        let p = preserved_for(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(169, 254, 2, 1));
+        assert!(p.tun.open_async().is_ok());
+    }
 
     #[test]
     fn test_forti_error_display_gateway_unreachable() {

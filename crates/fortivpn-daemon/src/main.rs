@@ -3,6 +3,7 @@
 
 mod installer;
 mod ipc;
+mod logging;
 mod notification;
 mod platform;
 mod profile;
@@ -12,12 +13,12 @@ use std::sync::{Arc, Mutex};
 
 #[tokio::main]
 async fn main() {
-    platform::init_logger();
+    let log_file = logging::init();
 
     // Install rustls CryptoProvider (required since multiple providers may be available)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    log::info!(target: "daemon", "FortiVPN daemon starting");
+    log::info!(target: "daemon", "FortiVPN daemon starting — logging to {}", log_file.display());
 
     let store = profile::ProfileStore::load();
     log::info!(target: "daemon", "Loaded {} profiles", store.profiles.len());

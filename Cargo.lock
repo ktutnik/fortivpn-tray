@@ -1985,6 +1985,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "libc",
+ "log",
  "quick-xml 0.37.5",
  "rand 0.9.2",
  "rustls",
@@ -2032,6 +2033,7 @@ name = "fortivpn-daemon"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
+ "chrono",
  "dirs 6.0.0",
  "env_logger",
  "fortivpn",

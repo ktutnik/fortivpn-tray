@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::profile::VpnProfile;
 use fortivpn::helper::HelperClient;
-use fortivpn::VpnSession;
+use fortivpn::{PreservedNetwork, VpnSession};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VpnStatus {
@@ -21,6 +21,10 @@ pub struct VpnManager {
     pub(crate) connected_profile_id: Option<String>,
     pub(crate) monitor_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) session_passwords: HashMap<String, String>,
+    /// Routes, DNS and TUN device held open between a dropped tunnel and its
+    /// reconnect. Must be released if the reconnect is abandoned, or the host is
+    /// left routing into a dead tunnel.
+    pub(crate) preserved_network: Option<PreservedNetwork>,
 }
 
 impl VpnManager {
@@ -32,6 +36,7 @@ impl VpnManager {
             connected_profile_id: None,
             monitor_handle: None,
             session_passwords: HashMap::new(),
+            preserved_network: None,
         }
     }
 
@@ -71,20 +76,37 @@ impl VpnManager {
         self.ensure_helper()?;
         let helper = self.helper.as_mut().unwrap();
 
-        let session = VpnSession::connect(
+        // Hand the previous session's routes/DNS/TUN to the new session so a
+        // reconnect to the same address does not touch the host's routing table.
+        // Anything left in `preserved` after the call is still installed and is
+        // reused by the next attempt.
+        let mut preserved = self.preserved_network.take();
+        let result = VpnSession::connect_reusing(
             &profile.host,
             profile.port,
             &profile.username,
             password,
             &profile.trusted_cert,
             helper,
+            &mut preserved,
         )
-        .await
-        .map_err(|e| {
+        .await;
+        self.preserved_network = preserved;
+
+        let session = result.map_err(|e| {
             self.status = VpnStatus::Error(e.to_string());
             self.connected_profile_id = None;
             e.to_string()
         })?;
+
+        // Log the negotiated MTU: it comes from the gateway's LCP MRU now, and it
+        // is the first thing to check if large transfers stall.
+        log::info!(
+            target: "vpn",
+            "Connected to {} — tunnel MTU {}",
+            profile.name,
+            session.mtu()
+        );
 
         self.session = Some(session);
         self.connected_profile_id = Some(profile.id.clone());
@@ -119,17 +141,35 @@ impl VpnManager {
     /// Returns the (profile_id, password) of the dead session so the caller can
     /// attempt an auto-reconnect.
     pub async fn handle_session_death(&mut self, reason: String) -> Option<(String, String)> {
-        if let Some(ref mut session) = self.session {
-            session.disconnect(self.helper.as_mut()).await;
-        }
-        self.session = None;
         let reconnect_info = self
             .connected_profile_id
             .take()
             .and_then(|id| self.session_passwords.remove(&id).map(|pw| (id, pw)));
+
+        if let Some(ref mut session) = self.session {
+            if reconnect_info.is_some() {
+                // A reconnect is coming: keep routes, DNS and the TUN device
+                // installed so the gap is a stall rather than a host-wide
+                // routing teardown that kills every open connection.
+                self.preserved_network = session
+                    .disconnect_preserving_network(self.helper.as_mut())
+                    .await;
+            } else {
+                session.disconnect(self.helper.as_mut()).await;
+            }
+        }
+        self.session = None;
         self.status = VpnStatus::Error(reason);
         self.monitor_handle = None;
         reconnect_info
+    }
+
+    /// Restore whatever a pending reconnect was holding open — routes, DNS and
+    /// the TUN device. A no-op when nothing is held.
+    pub(crate) fn release_preserved_network(&mut self) {
+        if let Some(preserved) = self.preserved_network.take() {
+            preserved.release(self.helper.as_mut());
+        }
     }
 
     pub async fn disconnect(&mut self) -> Result<(), String> {
@@ -142,6 +182,7 @@ impl VpnManager {
         if let Some(ref mut session) = self.session {
             session.disconnect(self.helper.as_mut()).await;
         }
+        self.release_preserved_network();
 
         if let Some(ref id) = self.connected_profile_id {
             self.session_passwords.remove(id);
@@ -427,6 +468,37 @@ mod tests {
         manager.handle_session_death("died".to_string()).await;
 
         assert!(manager.monitor_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_release_preserved_network_is_noop_when_empty() {
+        let mut manager = VpnManager::new();
+        manager.release_preserved_network();
+        assert!(manager.preserved_network.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_releases_preserved_network() {
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Reconnecting;
+        manager.disconnect().await.unwrap();
+        // Nothing may be left holding the host's routes hostage.
+        assert!(manager.preserved_network.is_none());
+        assert_eq!(manager.status, VpnStatus::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn test_session_death_without_reconnect_info_preserves_nothing() {
+        // No retained password means no reconnect is coming, so the routes must be
+        // restored rather than held.
+        let mut manager = VpnManager::new();
+        manager.status = VpnStatus::Connected;
+        manager.connected_profile_id = Some("p1".to_string());
+
+        let info = manager.handle_session_death("link down".to_string()).await;
+
+        assert_eq!(info, None);
+        assert!(manager.preserved_network.is_none());
     }
 
     #[test]

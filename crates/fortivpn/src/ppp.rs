@@ -187,21 +187,28 @@ impl IpcpOption {
     }
 }
 
+/// Default MRU when the gateway never states one.
+pub const DEFAULT_MRU: u16 = 1354;
+
 /// LCP negotiation state.
 pub struct LcpState {
     pub magic_number: u32,
     pub mru: u16,
     pub opened: bool,
     pub peer_magic: u32,
+    /// MRU the peer advertised in its Configure-Request — the largest frame it
+    /// is willing to receive. `None` if it never sent the option.
+    pub peer_mru: Option<u16>,
 }
 
 impl Default for LcpState {
     fn default() -> Self {
         Self {
             magic_number: rand::random::<u32>(),
-            mru: 1354,
+            mru: DEFAULT_MRU,
             opened: false,
             peer_magic: 0,
+            peer_mru: None,
         }
     }
 }
@@ -227,8 +234,13 @@ impl LcpState {
         let mut offset = 0;
         while offset < options_data.len() {
             if let Ok((opt, consumed)) = LcpOption::decode(&options_data[offset..]) {
-                if let LcpOption::MagicNumber(m) = opt {
-                    self.peer_magic = m;
+                match opt {
+                    LcpOption::MagicNumber(m) => self.peer_magic = m,
+                    // The peer's MRU bounds what we may send it. Recording it is
+                    // what lets the TUN device take its MTU from the gateway
+                    // instead of assuming DEFAULT_MRU.
+                    LcpOption::Mru(mru) => self.peer_mru = Some(mru),
+                    _ => {}
                 }
                 offset += consumed;
             } else {
@@ -258,6 +270,18 @@ impl LcpState {
             } else {
                 break;
             }
+        }
+    }
+
+    /// MTU to give the TUN device: the smaller of what the peer will accept and
+    /// what we told the peer we accept (our own MRU, possibly NAK'd down).
+    ///
+    /// Both directions cross the same interface, so the tighter of the two wins.
+    /// Falls back to our MRU when the gateway never advertised one.
+    pub fn negotiated_mtu(&self) -> u16 {
+        match self.peer_mru {
+            Some(peer) => peer.min(self.mru),
+            None => self.mru,
         }
     }
 

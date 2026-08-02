@@ -182,6 +182,36 @@ impl AsyncWrite for AsyncTunFd {
     }
 }
 
+// ── TunKeeper ───────────────────────────────────────────────────────────────
+
+/// Windows placeholder. A `tun2::AsyncDevice` cannot be duplicated, so there is
+/// no way to hold the interface open while no bridge is running — a Windows
+/// reconnect always rebuilds the TUN device and reinstalls its routes.
+pub struct TunKeeper {
+    _private: (),
+}
+
+impl TunKeeper {
+    pub fn from_handle(_handle: &TunHandle) -> io::Result<Self> {
+        Err(unsupported())
+    }
+
+    pub fn name(&self) -> &str {
+        ""
+    }
+
+    pub fn open_async(&self) -> io::Result<AsyncTunFd> {
+        Err(unsupported())
+    }
+}
+
+fn unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Preserving the TUN device across a reconnect is not supported on Windows",
+    )
+}
+
 // ── Routing ─────────────────────────────────────────────────────────────────
 
 pub fn run_route(action: &str, dest: &str, gateway: &str) -> Result<(), FortiError> {

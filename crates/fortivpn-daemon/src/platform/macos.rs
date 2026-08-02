@@ -5,15 +5,6 @@ const HELPER_SOCKET: &str = "/var/run/fortivpn-helper.sock";
 const HELPER_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/fortivpn-helper";
 const PLIST_INSTALL_PATH: &str = "/Library/LaunchDaemons/com.fortivpn-tray.helper.plist";
 
-pub fn init_logger() {
-    oslog::OsLogger::new("com.fortivpn-tray")
-        .level_filter(log::LevelFilter::Info)
-        .category_level_filter("ipc", log::LevelFilter::Debug)
-        .category_level_filter("vpn", log::LevelFilter::Debug)
-        .init()
-        .ok();
-}
-
 /// Check if the helper daemon is installed and reachable.
 pub fn is_helper_installed() -> bool {
     std::os::unix::net::UnixStream::connect(HELPER_SOCKET).is_ok()

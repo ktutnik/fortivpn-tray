@@ -130,7 +130,7 @@ fn spawn_session_monitor(
                 Err(_) => break "Connection lost".to_string(),
             }
         };
-        log::warn!(target: "vpn", "Session died: {reason}");
+        log::warn!(target: "vpn", "Session died: {reason} — evaluating reconnect");
 
         let reconnect_info = {
             let mut vpn = state.vpn.lock().await;
@@ -147,6 +147,8 @@ fn spawn_session_monitor(
         });
 
         let (Some((_, password)), Some(profile)) = (reconnect_info, profile) else {
+            // No reconnect will happen — give the host its routing back.
+            state.vpn.lock().await.release_preserved_network();
             crate::notification::send_notification("FortiVPN Disconnected", &reason);
             let _ = state.status_tx.send(
                 serde_json::json!({"event":"status","data":{"status":format!("error: {reason}"),"profile":null}}).to_string()
@@ -160,12 +162,25 @@ fn spawn_session_monitor(
 
         for attempt in 1..=RECONNECT_MAX_ATTEMPTS {
             let delay = RECONNECT_BASE_DELAY_SECS * 2u64.pow(attempt - 1);
+            log::info!(
+                target: "vpn",
+                "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} to '{}' after {delay}s backoff",
+                profile.name
+            );
             tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
 
             let result = {
                 let mut vpn = state.vpn.lock().await;
                 // User connected/disconnected manually during the backoff — stand down.
                 if vpn.status != VpnStatus::Reconnecting {
+                    log::info!(
+                        target: "vpn",
+                        "Standing down from reconnect — status changed to {:?} (user acted)",
+                        vpn.status
+                    );
+                    // Their connect/disconnect already dealt with the preserved
+                    // routes; this is a no-op unless something was left behind.
+                    vpn.release_preserved_network();
                     return;
                 }
                 vpn.connect_with_password(&profile, &password).await
@@ -202,6 +217,9 @@ fn spawn_session_monitor(
 
         {
             let mut vpn = state.vpn.lock().await;
+            // Out of attempts: restore the routes, DNS and TUN we were holding
+            // for the reconnect, otherwise the host keeps routing into nothing.
+            vpn.release_preserved_network();
             if vpn.status == VpnStatus::Reconnecting || matches!(vpn.status, VpnStatus::Error(_)) {
                 vpn.status = VpnStatus::Error(format!("Reconnect failed: {reason}"));
             }
