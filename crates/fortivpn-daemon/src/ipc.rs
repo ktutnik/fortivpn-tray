@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -17,6 +18,8 @@ pub struct AppState {
     pub vpn: VpnState,
     pub store: StoreState,
     pub status_tx: tokio::sync::broadcast::Sender<String>,
+    /// One message per system wake, carrying how long the machine slept.
+    pub wake_tx: tokio::sync::broadcast::Sender<Duration>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,10 +113,76 @@ async fn handle_subscribe(
 const RECONNECT_MAX_ATTEMPTS: u32 = 5;
 const RECONNECT_BASE_DELAY_SECS: u64 = 3;
 
+/// Longest one reconnect attempt may run. A healthy connect takes ~3.5 s; one
+/// still going at this point is stuck on a connection that is not coming back.
+const RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// On every wake, make a connected tunnel prove it survived the sleep.
+///
+/// After a sleep the gateway has often dropped the session. Left to the LCP
+/// echo budget, the dead tunnel kept all host traffic for ~60 s after a lid
+/// open (2026-09-18..25). A reconnect already under way watches for wakes itself.
+pub fn spawn_wake_handler(state: AppState) -> tokio::task::JoinHandle<()> {
+    let mut wake_rx = state.wake_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match wake_rx.recv().await {
+                Ok(_) => {
+                    if state.vpn.lock().await.probe_session() {
+                        log::info!(target: "vpn", "Woke while connected — probing the tunnel");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+enum AttemptOutcome {
+    Connected,
+    /// The user connected or disconnected in the meantime.
+    StoodDown,
+    Failed(String),
+    /// Still running when the machine woke, so it straddled a sleep and its
+    /// connection is almost certainly dead. Retried at once and not counted:
+    /// lid closed, the machine dark-wakes for seconds at a time, and counting
+    /// those would give up overnight without a real attempt having failed.
+    Woke,
+}
+
+async fn try_reconnect(
+    state: &AppState,
+    profile: &crate::profile::VpnProfile,
+    password: &str,
+) -> AttemptOutcome {
+    let mut vpn = state.vpn.lock().await;
+    // User connected/disconnected manually during the backoff — stand down.
+    if vpn.status != VpnStatus::Reconnecting {
+        log::info!(
+            target: "vpn",
+            "Standing down from reconnect — status changed to {:?} (user acted)",
+            vpn.status
+        );
+        // Their connect/disconnect already dealt with the preserved
+        // routes; this is a no-op unless something was left behind.
+        vpn.release_preserved_network();
+        return AttemptOutcome::StoodDown;
+    }
+    match vpn.reconnect(profile, password).await {
+        Ok(()) => AttemptOutcome::Connected,
+        Err(e) => AttemptOutcome::Failed(e),
+    }
+}
+
 /// Watch a session's event channel; on death, tear down and auto-reconnect.
 /// Re-arms itself after a successful reconnect. Delays back off exponentially
 /// (3s, 6s, 12s, 24s, 48s). A manual connect/disconnect during the backoff
 /// window changes the status away from Reconnecting, which aborts the loop.
+///
+/// Routes stay pointed at the tunnel only for the first attempt: a quick flap
+/// then costs no connections. Once an attempt fails the host gets its routing
+/// back, so traffic flows directly while the retries go on.
 fn spawn_session_monitor(
     state: AppState,
     mut event_rx: tokio::sync::watch::Receiver<fortivpn::VpnEvent>,
@@ -160,34 +229,54 @@ fn spawn_session_monitor(
             serde_json::json!({"event":"status","data":{"status":"reconnecting","profile":profile.name}}).to_string()
         );
 
-        for attempt in 1..=RECONNECT_MAX_ATTEMPTS {
-            let delay = RECONNECT_BASE_DELAY_SECS * 2u64.pow(attempt - 1);
-            log::info!(
-                target: "vpn",
-                "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} to '{}' after {delay}s backoff",
-                profile.name
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+        // tokio timers stop while the machine sleeps, so without this a backoff
+        // or an attempt begun before a sleep resumes at wake as if no time had
+        // passed — on a connection that died meanwhile.
+        let mut wake_rx = state.wake_tx.subscribe();
+        let mut attempt = 1;
+        let mut skip_backoff = false;
 
-            let result = {
-                let mut vpn = state.vpn.lock().await;
-                // User connected/disconnected manually during the backoff — stand down.
-                if vpn.status != VpnStatus::Reconnecting {
-                    log::info!(
-                        target: "vpn",
-                        "Standing down from reconnect — status changed to {:?} (user acted)",
-                        vpn.status
-                    );
-                    // Their connect/disconnect already dealt with the preserved
-                    // routes; this is a no-op unless something was left behind.
-                    vpn.release_preserved_network();
-                    return;
+        while attempt <= RECONNECT_MAX_ATTEMPTS {
+            if skip_backoff {
+                skip_backoff = false;
+                log::info!(
+                    target: "vpn",
+                    "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} to '{}' right after wake",
+                    profile.name
+                );
+            } else {
+                let delay = RECONNECT_BASE_DELAY_SECS * 2u64.pow(attempt - 1);
+                log::info!(
+                    target: "vpn",
+                    "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} to '{}' after {delay}s backoff",
+                    profile.name
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                    Ok(_) = wake_rx.recv() => {
+                        log::info!(target: "vpn", "Woke during backoff — retrying now");
+                    }
                 }
-                vpn.connect_with_password(&profile, &password).await
+            }
+
+            // Dropping the attempt future is safe: the preserved routes stay in
+            // the manager until adopted, and the status is settled below.
+            let outcome = tokio::select! {
+                r = tokio::time::timeout(
+                    RECONNECT_ATTEMPT_TIMEOUT,
+                    try_reconnect(&state, &profile, &password),
+                ) => r.unwrap_or_else(|_| {
+                    AttemptOutcome::Failed(format!(
+                        "no progress after {}s",
+                        RECONNECT_ATTEMPT_TIMEOUT.as_secs()
+                    ))
+                }),
+                Ok(_) = wake_rx.recv() => AttemptOutcome::Woke,
             };
 
-            match result {
-                Ok(()) => {
+            match outcome {
+                AttemptOutcome::StoodDown => return,
+                AttemptOutcome::Connected => {
                     {
                         let mut vpn = state.vpn.lock().await;
                         if let Some(ref mut session) = vpn.session {
@@ -202,14 +291,42 @@ fn spawn_session_monitor(
                     );
                     return;
                 }
-                Err(e) => {
-                    log::warn!(target: "vpn", "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} failed: {e}");
+                AttemptOutcome::Failed(_) | AttemptOutcome::Woke => {
+                    let counted = matches!(outcome, AttemptOutcome::Failed(_));
+                    match &outcome {
+                        AttemptOutcome::Failed(e) => log::warn!(
+                            target: "vpn",
+                            "Reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} failed: {e}"
+                        ),
+                        _ => log::info!(
+                            target: "vpn",
+                            "Woke mid-attempt — abandoning attempt {attempt}, it straddled the sleep"
+                        ),
+                    }
                     let mut vpn = state.vpn.lock().await;
-                    // connect_with_password leaves status at Error on failure;
-                    // restore Reconnecting unless the user intervened meanwhile.
-                    if matches!(vpn.status, VpnStatus::Error(_)) && attempt < RECONNECT_MAX_ATTEMPTS
-                    {
+                    // An abandoned attempt leaves the status at Connecting.
+                    if vpn.status == VpnStatus::Connecting {
                         vpn.status = VpnStatus::Reconnecting;
+                    }
+                    // A failed connect leaves status at Error; restore
+                    // Reconnecting unless the user intervened meanwhile.
+                    let retrying = !counted || attempt < RECONNECT_MAX_ATTEMPTS;
+                    if matches!(vpn.status, VpnStatus::Error(_)) && retrying {
+                        vpn.status = VpnStatus::Reconnecting;
+                    }
+                    // Not a quick flap after all: stop routing the host into a
+                    // dead tunnel for the rest of the retries.
+                    if vpn.status == VpnStatus::Reconnecting && vpn.preserved_network.is_some() {
+                        log::info!(
+                            target: "vpn",
+                            "Reconnect not immediate — restoring direct routing while retrying"
+                        );
+                        vpn.release_preserved_network();
+                    }
+                    if counted {
+                        attempt += 1;
+                    } else {
+                        skip_backoff = true;
                     }
                 }
             }
@@ -715,10 +832,12 @@ mod tests {
     fn make_state() -> AppState {
         let store = make_store();
         let (status_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+        let (wake_tx, _) = tokio::sync::broadcast::channel::<Duration>(4);
         AppState {
             vpn: std::sync::Arc::new(tokio::sync::Mutex::new(crate::vpn::VpnManager::new())),
             store: std::sync::Arc::new(std::sync::Mutex::new(store)),
             status_tx,
+            wake_tx,
         }
     }
 

@@ -27,6 +27,16 @@ const WRITE_BATCH_LIMIT: usize = 32;
 /// How often the tunnel reports its vitals while healthy.
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a liveness probe waits for any inbound frame before declaring the
+/// tunnel dead.
+///
+/// Probes are sent right after the machine wakes. The regular echo budget
+/// (~60 s) is the wrong tool there: after sleep the gateway has often dropped
+/// the session, and every second spent waiting is a second the host routes all
+/// its traffic into a dead tunnel. A tunnel that is alive answers in one round
+/// trip (~0.1 s to the SG gateway); the rest is slack for Wi-Fi reassociating.
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Live counters for one tunnel.
 ///
 /// A drop is diagnosed from what the tunnel was doing in the minute before it
@@ -119,14 +129,14 @@ const PI_HEADER_SIZE: usize = 4;
 #[cfg(not(target_os = "macos"))]
 const PI_HEADER_SIZE: usize = 0;
 
-/// Establish an async TLS connection to the FortiGate gateway.
+/// Establish an async TLS connection to the FortiGate gateway at an already
+/// resolved address. `host` is still needed for SNI and certificate checks.
 pub async fn async_tls_connect(
     host: &str,
-    port: u16,
+    addr: std::net::SocketAddr,
     trusted_cert: &str,
 ) -> Result<TlsStream<TcpStream>, FortiError> {
-    let addr = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&addr)
+    let tcp = TcpStream::connect(addr)
         .await
         .map_err(|e| FortiError::GatewayUnreachable(format!("{e}")))?;
     tcp.set_nodelay(true).ok();
@@ -399,6 +409,9 @@ pub struct BridgeHandle {
     pub alive: Arc<AtomicBool>,
     pub event_rx: tokio::sync::watch::Receiver<crate::VpnEvent>,
     pub stats: Arc<BridgeStats>,
+    /// Notify to send a liveness probe: an echo now, and death unless something
+    /// arrives within [`PROBE_TIMEOUT`].
+    pub probe: Arc<Notify>,
 }
 
 /// Start the bidirectional bridge between TLS tunnel and tun device.
@@ -416,6 +429,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
     let (tls_reader, tls_writer) = split(tls_stream);
     let (tun_reader, tun_writer) = split(tun_device);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
+    let probe = Arc::new(Notify::new());
 
     // Task 1: Tunnel writer — drains channel and writes to TLS
     let tunnel_writer_task = {
@@ -435,6 +449,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         let outbound_tx = outbound_tx.clone();
         let event_tx = event_tx.clone();
         let stats = stats.clone();
+        let probe = probe.clone();
         tokio::spawn(async move {
             tunnel_reader_loop(
                 tls_reader,
@@ -445,6 +460,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
                 magic_number,
                 event_tx,
                 stats,
+                probe,
             )
             .await;
         })
@@ -480,6 +496,7 @@ pub fn start_bridge<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'st
         alive,
         event_rx,
         stats,
+        probe,
     }
 }
 
@@ -568,10 +585,14 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     magic_number: u32,
     event_tx: Arc<tokio::sync::watch::Sender<crate::VpnEvent>>,
     stats: Arc<BridgeStats>,
+    probe: Arc<Notify>,
 ) {
     let mut echo_interval = echo_timer(ECHO_INTERVAL);
     let mut echo_id: u8 = 0;
     let mut missed_echoes: u8 = 0;
+    // Armed by a liveness probe: the tunnel must deliver an inbound frame
+    // before this instant or it is declared dead.
+    let mut probe_deadline: Option<tokio::time::Instant> = None;
 
     // Cancel-safe: the echo timer and shutdown branches below can drop the read
     // future mid-frame, and FrameReader resumes instead of losing the bytes.
@@ -580,19 +601,40 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
-            _ = echo_interval.tick() => {
-                // Send LCP echo request
+            _ = probe.notified() => {
                 echo_id = echo_id.wrapping_add(1);
-                let echo = PppPacket {
-                    protocol: LCP_PROTOCOL,
-                    code: LCP_ECHO_REQUEST,
-                    identifier: echo_id,
-                    data: magic_number.to_be_bytes().to_vec(),
-                };
-                if outbound_tx.send(echo.encode()).await.is_err() {
+                if !send_echo(&outbound_tx, echo_id, magic_number, &stats) {
                     break;
                 }
-                stats.echoes_sent.fetch_add(1, Ordering::Relaxed);
+                // A probe already running keeps its deadline. Lid closed, the
+                // machine dark-wakes for a few seconds every ~15 min; resetting
+                // on each of those would let a dead tunnel outlive them all.
+                if probe_deadline.is_none() {
+                    probe_deadline = Some(tokio::time::Instant::now() + PROBE_TIMEOUT);
+                }
+                log::info!(target: "vpn", "Probing tunnel liveness | {}", stats.summary());
+            }
+            // The expression is evaluated even while the branch is disabled, so
+            // it must not unwrap.
+            _ = tokio::time::sleep_until(probe_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if probe_deadline.is_some() =>
+            {
+                declare_dead(
+                    format!(
+                        "No response within {}s of a liveness probe",
+                        PROBE_TIMEOUT.as_secs()
+                    ),
+                    &stats,
+                    &alive,
+                    &event_tx,
+                );
+                break;
+            }
+            _ = echo_interval.tick() => {
+                echo_id = echo_id.wrapping_add(1);
+                if !send_echo(&outbound_tx, echo_id, magic_number, &stats) {
+                    break;
+                }
                 missed_echoes = missed_echoes.saturating_add(1);
                 if missed_echoes >= MAX_MISSED_ECHOES {
                     declare_dead(
@@ -632,6 +674,7 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 // echo-requests, so relying solely on Echo-Reply falsely kills a
                 // healthy, actively-used tunnel (~30s after connect → reconnect loop).
                 missed_echoes = 0;
+                probe_deadline = None;
 
                 if frame.len() < 4 {
                     continue; // skip empty/too-short frames
@@ -666,7 +709,9 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                                     identifier: id,
                                     data: magic_number.to_be_bytes().to_vec(),
                                 };
-                                let _ = outbound_tx.send(reply.encode()).await;
+                                // Dropped rather than awaited when the writer is
+                                // backed up — see send_echo.
+                                let _ = outbound_tx.try_send(reply.encode());
                             }
                             LCP_ECHO_REPLY => {
                                 stats.echo_replies.fetch_add(1, Ordering::Relaxed);
@@ -695,6 +740,35 @@ async fn tunnel_reader_loop<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 }
             }
         }
+    }
+}
+
+/// Queue an LCP echo request. Returns `false` only once the writer is gone.
+///
+/// Never awaits channel space. When the TCP connection stalls, the writer
+/// blocks, the channel fills, and awaiting here parks the whole reader loop —
+/// echoes and the miss counter stop with it, so a dead link is never declared
+/// dead (2026-09-23: 210 s of silence, echo count frozen, until a broken pipe).
+/// An echo that cannot be queued still counts as a missed one.
+fn send_echo(
+    outbound_tx: &mpsc::Sender<Vec<u8>>,
+    echo_id: u8,
+    magic_number: u32,
+    stats: &BridgeStats,
+) -> bool {
+    let echo = PppPacket {
+        protocol: LCP_PROTOCOL,
+        code: LCP_ECHO_REQUEST,
+        identifier: echo_id,
+        data: magic_number.to_be_bytes().to_vec(),
+    };
+    match outbound_tx.try_send(echo.encode()) {
+        Ok(()) => {
+            stats.echoes_sent.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
     }
 }
 
@@ -1049,6 +1123,7 @@ mod tests {
                 0x12345678,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1112,6 +1187,7 @@ mod tests {
                 magic,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1240,6 +1316,7 @@ mod tests {
                 0x11111111,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1292,6 +1369,7 @@ mod tests {
                 0x11111111,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1348,6 +1426,7 @@ mod tests {
                 0x11111111,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1392,6 +1471,7 @@ mod tests {
                 0x11111111,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1507,6 +1587,7 @@ mod tests {
                 0x11111111,
                 event_tx,
                 Arc::new(BridgeStats::default()),
+                Arc::new(Notify::new()),
             )
             .await;
         });
@@ -1517,5 +1598,155 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         assert!(!alive.load(Ordering::Relaxed));
         assert!(matches!(*event_rx.borrow(), crate::VpnEvent::Died(_)));
+    }
+
+    /// A reader loop over an in-memory tunnel. The gateway end stays open and
+    /// silent unless the test writes to it.
+    struct ReaderHarness {
+        gateway: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        outbound_tx: mpsc::Sender<Vec<u8>>,
+        outbound_rx: mpsc::Receiver<Vec<u8>>,
+        alive: Arc<AtomicBool>,
+        event_rx: tokio::sync::watch::Receiver<crate::VpnEvent>,
+        probe: Arc<Notify>,
+        shutdown: Arc<Notify>,
+        handle: tokio::task::JoinHandle<()>,
+        _tun: tokio::io::DuplexStream,
+    }
+
+    fn spawn_reader(outbound_capacity: usize) -> ReaderHarness {
+        let (tunnel_stream, mock_tunnel) = tokio::io::duplex(65536);
+        let (tunnel_reader, _) = tokio::io::split(tunnel_stream);
+        let (_, gateway) = tokio::io::split(mock_tunnel);
+        let (tun_stream, tun) = tokio::io::duplex(65536);
+        let (_, tun_writer) = tokio::io::split(tun_stream);
+
+        let shutdown = Arc::new(Notify::new());
+        let alive = Arc::new(AtomicBool::new(true));
+        let probe = Arc::new(Notify::new());
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(outbound_capacity);
+        let (event_tx, event_rx) = tokio::sync::watch::channel(crate::VpnEvent::Alive);
+
+        let handle = tokio::spawn(tunnel_reader_loop(
+            tunnel_reader,
+            tun_writer,
+            outbound_tx.clone(),
+            shutdown.clone(),
+            alive.clone(),
+            0x11111111,
+            Arc::new(event_tx),
+            Arc::new(BridgeStats::default()),
+            probe.clone(),
+        ));
+
+        ReaderHarness {
+            gateway,
+            outbound_tx,
+            outbound_rx,
+            alive,
+            event_rx,
+            probe,
+            shutdown,
+            handle,
+            _tun: tun,
+        }
+    }
+
+    fn death_reason(h: &ReaderHarness) -> String {
+        match &*h.event_rx.borrow() {
+            crate::VpnEvent::Died(reason) => reason.clone(),
+            other => panic!("tunnel not declared dead: {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_probe_declares_silent_tunnel_dead_within_probe_timeout() {
+        let mut h = spawn_reader(16);
+        h.probe.notify_one();
+
+        // Far sooner than the ~60 s echo budget a silent tunnel otherwise gets.
+        tokio::time::timeout(
+            PROBE_TIMEOUT + std::time::Duration::from_secs(1),
+            &mut h.handle,
+        )
+        .await
+        .expect("probe deadline did not fire")
+        .unwrap();
+
+        assert!(!h.alive.load(Ordering::Relaxed));
+        assert!(death_reason(&h).contains("liveness probe"));
+        let sent = PppPacket::decode(&h.outbound_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(sent.code, LCP_ECHO_REQUEST, "the probe goes out as an echo");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_probe_answered_keeps_tunnel_alive() {
+        let mut h = spawn_reader(16);
+        h.probe.notify_one();
+        h.outbound_rx.recv().await.unwrap(); // the probe's echo request
+
+        let reply = PppPacket {
+            protocol: LCP_PROTOCOL,
+            code: LCP_ECHO_REPLY,
+            identifier: 1,
+            data: 0x22222222u32.to_be_bytes().to_vec(),
+        };
+        write_frame(&mut h.gateway, &reply.encode()).await.unwrap();
+
+        // Well past the probe deadline, still inside the regular echo budget.
+        tokio::time::sleep(PROBE_TIMEOUT * 2).await;
+        assert!(h.alive.load(Ordering::Relaxed));
+        assert!(!h.handle.is_finished());
+
+        h.shutdown.notify_waiters();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wedged_writer_does_not_stall_dead_link_detection() {
+        // Capacity 1, filled and never drained: the writer is stuck on a stalled
+        // TCP connection. Awaiting channel space here used to freeze the echo
+        // counter, so the dead link was never declared dead.
+        let mut h = spawn_reader(1);
+        h.outbound_tx.try_send(vec![0]).unwrap();
+
+        let budget = ECHO_INTERVAL * (u32::from(MAX_MISSED_ECHOES) + 1);
+        tokio::time::timeout(budget, &mut h.handle)
+            .await
+            .expect("dead link never declared dead")
+            .unwrap();
+        assert!(death_reason(&h).contains("LCP echo timeout"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_probe_with_wedged_writer_still_fires() {
+        let mut h = spawn_reader(1);
+        h.outbound_tx.try_send(vec![0]).unwrap();
+        h.probe.notify_one();
+
+        tokio::time::timeout(
+            PROBE_TIMEOUT + std::time::Duration::from_secs(1),
+            &mut h.handle,
+        )
+        .await
+        .expect("probe deadline did not fire")
+        .unwrap();
+        assert!(death_reason(&h).contains("liveness probe"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_repeated_probe_keeps_the_first_deadline() {
+        let mut h = spawn_reader(16);
+        h.probe.notify_one();
+        h.outbound_rx.recv().await.unwrap();
+
+        // A second probe most of the way through must not buy more time.
+        tokio::time::sleep(PROBE_TIMEOUT - std::time::Duration::from_secs(2)).await;
+        h.probe.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), &mut h.handle)
+            .await
+            .expect("second probe extended the deadline")
+            .unwrap();
+        assert!(death_reason(&h).contains("liveness probe"));
     }
 }

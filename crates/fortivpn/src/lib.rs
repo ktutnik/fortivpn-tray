@@ -8,7 +8,7 @@ pub mod routing;
 pub mod tun;
 pub mod tunnel;
 
-use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Command;
 
 /// Create a Command that doesn't show a console window on Windows.
@@ -145,8 +145,11 @@ pub struct VpnSession {
     event_rx: Option<tokio::sync::watch::Receiver<VpnEvent>>,
     host: String,
     port: u16,
+    /// The one address every connection of this session went to.
+    gateway_addr: SocketAddr,
     cookie: String,
     trusted_cert: String,
+    probe: Arc<Notify>,
     /// Spare TUN descriptor, so the interface can outlive this session's bridge.
     /// `None` on platforms that cannot duplicate the device.
     tun_keeper: Option<platform::TunKeeper>,
@@ -169,6 +172,7 @@ impl VpnSession {
         Self::connect_reusing(
             host,
             port,
+            None,
             username,
             password,
             trusted_cert,
@@ -181,14 +185,20 @@ impl VpnSession {
     /// Connect, adopting the TUN device and routes left behind by a previous
     /// session when the gateway hands back the same addressing.
     ///
+    /// `known_addr` skips DNS: a reconnect passes the address the dead session
+    /// used. Otherwise the gateway is resolved once here, and that one address
+    /// serves login, tunnel, host route and logout alike.
+    ///
     /// `preserved` is taken only once its fate is decided: adopted on a matching
     /// reconnect, released when the addressing changed. It is left untouched if
     /// this attempt fails earlier than that, so the caller can retry with the
-    /// routes still in place.
+    /// routes still in place. No await point follows the take, so dropping this
+    /// future mid-connect never loses the preserved state either.
     #[allow(clippy::too_many_arguments)]
     pub async fn connect_reusing(
         host: &str,
         port: u16,
+        known_addr: Option<SocketAddr>,
         username: &str,
         password: &str,
         trusted_cert: &str,
@@ -208,13 +218,37 @@ impl VpnSession {
 
         log::info!(target: "vpn", "connect[{host}:{port}] starting as {username}");
 
+        // Phase 0: Gateway address. A reconnect reuses the dead session's
+        // address: right after a wake or a network change the lookup has failed
+        // instantly on every attempt for over a minute (2026-09-21..23), while
+        // the gateway's address had not changed.
+        let gateway_addr = match known_addr {
+            Some(addr) => {
+                log::info!(target: "vpn", "connect[{host}:{port}] using known gateway address {addr} (no DNS)");
+                addr
+            }
+            None => {
+                let addr = tokio::task::spawn_blocking({
+                    let host = host.to_string();
+                    move || auth::resolve_gateway(&host, port)
+                })
+                .await
+                .map_err(|e| FortiError::Io(std::io::Error::other(e)))?
+                .inspect_err(
+                    |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in dns: {e}"),
+                )?;
+                phase(&format!("resolved {addr}"));
+                addr
+            }
+        };
+
         // Phase 1: Authenticate (sync TLS in blocking task)
         let (cookie, config) = tokio::task::spawn_blocking({
             let host = host.to_string();
             let username = username.to_string();
             let password = password.to_string();
             let trusted_cert = trusted_cert.to_string();
-            move || auth::authenticate(&host, port, &username, &password, &trusted_cert)
+            move || auth::authenticate_at(&host, gateway_addr, &username, &password, &trusted_cert)
         })
         .await
         .map_err(|e| FortiError::Io(std::io::Error::other(e)))?
@@ -224,7 +258,7 @@ impl VpnSession {
         phase("auth ok");
 
         // Phase 2: Open async TLS tunnel
-        let mut tls_stream = bridge::async_tls_connect(host, port, trusted_cert)
+        let mut tls_stream = bridge::async_tls_connect(host, gateway_addr, trusted_cert)
             .await
             .inspect_err(
                 |e| log::error!(target: "vpn", "connect[{host}:{port}] FAILED in tls_connect: {e}"),
@@ -292,15 +326,13 @@ impl VpnSession {
             let tun_dev = platform::AsyncTunFd::from_handle(tun_handle)
                 .map_err(|e| FortiError::TunDeviceError(format!("Async tun: {e}")))?;
 
-            let gateway_ip = format!("{host}:{port}")
-                .to_socket_addrs()
-                .ok()
-                .and_then(|mut addrs| addrs.next())
-                .map(|a| match a.ip() {
-                    std::net::IpAddr::V4(ip) => ip,
-                    _ => Ipv4Addr::UNSPECIFIED,
-                })
-                .unwrap_or(Ipv4Addr::UNSPECIFIED);
+            // The address this session is actually connected to — a second
+            // lookup here could disagree with it and pin the host route to an
+            // address the tunnel is not using.
+            let gateway_ip = match gateway_addr.ip() {
+                std::net::IpAddr::V4(ip) => ip,
+                _ => Ipv4Addr::UNSPECIFIED,
+            };
             phase(&format!("tun {tun_name} created"));
 
             let mut route_manager = routing::RouteManager::new(gateway_ip, &tun_name);
@@ -335,8 +367,10 @@ impl VpnSession {
             alive: bridge_handle.alive,
             event_rx: Some(bridge_handle.event_rx),
             stats: bridge_handle.stats,
+            probe: bridge_handle.probe,
             host: host.to_string(),
             port,
+            gateway_addr,
             cookie,
             trusted_cert: trusted_cert.to_string(),
             tun_keeper,
@@ -354,6 +388,19 @@ impl VpnSession {
     /// Live counters for this session's tunnel.
     pub fn stats(&self) -> &bridge::BridgeStats {
         &self.stats
+    }
+
+    /// The gateway address this session is connected to, for a reconnect to
+    /// reuse without DNS.
+    pub fn gateway_addr(&self) -> SocketAddr {
+        self.gateway_addr
+    }
+
+    /// Ask the tunnel to prove it is alive: an echo goes out now, and the
+    /// session dies unless something arrives within [`bridge::PROBE_TIMEOUT`]
+    /// of the first probe still unanswered.
+    pub fn probe_liveness(&self) {
+        self.probe.notify_one();
     }
 
     /// Take the event receiver for external monitoring.
@@ -448,11 +495,11 @@ impl VpnSession {
     /// Tell the gateway the session is over (best-effort).
     async fn send_logout(&self) {
         let host = self.host.clone();
-        let port = self.port;
+        let addr = self.gateway_addr;
         let cookie = self.cookie.clone();
         let trusted_cert = self.trusted_cert.clone();
         let _ =
-            tokio::task::spawn_blocking(move || send_logout(&host, port, &cookie, &trusted_cert))
+            tokio::task::spawn_blocking(move || send_logout(&host, addr, &cookie, &trusted_cert))
                 .await;
     }
 }
@@ -477,10 +524,10 @@ fn build_logout_request(host: &str, port: u16, cookie: &str) -> String {
 }
 
 /// Send logout request to the gateway (clean session termination).
-fn send_logout(host: &str, port: u16, cookie: &str, trusted_cert: &str) {
-    if let Ok(mut tls) = auth::tls_connect(host, port, trusted_cert) {
+fn send_logout(host: &str, addr: SocketAddr, cookie: &str, trusted_cert: &str) {
+    if let Ok(mut tls) = auth::tls_connect(host, addr, trusted_cert) {
         use std::io::Write;
-        let req = build_logout_request(host, port, cookie);
+        let req = build_logout_request(host, addr.port(), cookie);
         let _ = tls.write_all(req.as_bytes());
         let _ = tls.flush();
     }

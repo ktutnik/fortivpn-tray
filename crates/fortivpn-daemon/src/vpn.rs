@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use crate::profile::VpnProfile;
 use fortivpn::helper::HelperClient;
@@ -25,6 +26,9 @@ pub struct VpnManager {
     /// reconnect. Must be released if the reconnect is abandoned, or the host is
     /// left routing into a dead tunnel.
     pub(crate) preserved_network: Option<PreservedNetwork>,
+    /// Host, port and address of the last session that connected, so a
+    /// reconnect to the same gateway can skip DNS.
+    pub(crate) last_gateway: Option<(String, u16, SocketAddr)>,
 }
 
 impl VpnManager {
@@ -37,6 +41,7 @@ impl VpnManager {
             monitor_handle: None,
             session_passwords: HashMap::new(),
             preserved_network: None,
+            last_gateway: None,
         }
     }
 
@@ -61,10 +66,34 @@ impl VpnManager {
         Ok(self.helper.as_mut().unwrap())
     }
 
+    /// Connect fresh, resolving the gateway through DNS.
     pub async fn connect_with_password(
         &mut self,
         profile: &VpnProfile,
         password: &str,
+    ) -> Result<(), String> {
+        self.connect_to(profile, password, None).await
+    }
+
+    /// Reconnect after a drop, to the address the previous session used.
+    pub async fn reconnect(&mut self, profile: &VpnProfile, password: &str) -> Result<(), String> {
+        let known_addr = self.known_gateway_addr(profile);
+        self.connect_to(profile, password, known_addr).await
+    }
+
+    /// The address the last session to this profile's gateway connected to.
+    fn known_gateway_addr(&self, profile: &VpnProfile) -> Option<SocketAddr> {
+        self.last_gateway
+            .as_ref()
+            .filter(|(host, port, _)| *host == profile.host && *port == profile.port)
+            .map(|(_, _, addr)| *addr)
+    }
+
+    async fn connect_to(
+        &mut self,
+        profile: &VpnProfile,
+        password: &str,
+        known_addr: Option<SocketAddr>,
     ) -> Result<(), String> {
         if self.status == VpnStatus::Connected {
             return Err("Already connected".to_string());
@@ -78,20 +107,20 @@ impl VpnManager {
 
         // Hand the previous session's routes/DNS/TUN to the new session so a
         // reconnect to the same address does not touch the host's routing table.
-        // Anything left in `preserved` after the call is still installed and is
-        // reused by the next attempt.
-        let mut preserved = self.preserved_network.take();
+        // Lent in place rather than moved out: when the reconnect loop drops
+        // this future mid-connect, whatever was not yet adopted is still here to
+        // be reused or released.
         let result = VpnSession::connect_reusing(
             &profile.host,
             profile.port,
+            known_addr,
             &profile.username,
             password,
             &profile.trusted_cert,
             helper,
-            &mut preserved,
+            &mut self.preserved_network,
         )
         .await;
-        self.preserved_network = preserved;
 
         let session = result.map_err(|e| {
             self.status = VpnStatus::Error(e.to_string());
@@ -108,6 +137,7 @@ impl VpnManager {
             session.mtu()
         );
 
+        self.last_gateway = Some((profile.host.clone(), profile.port, session.gateway_addr()));
         self.session = Some(session);
         self.connected_profile_id = Some(profile.id.clone());
         // Retain the password in memory for the session so the monitor can
@@ -162,6 +192,18 @@ impl VpnManager {
         self.status = VpnStatus::Error(reason);
         self.monitor_handle = None;
         reconnect_info
+    }
+
+    /// Ask a connected session to prove it is still alive. Returns whether a
+    /// probe was sent.
+    pub fn probe_session(&self) -> bool {
+        match (&self.status, &self.session) {
+            (VpnStatus::Connected, Some(session)) => {
+                session.probe_liveness();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Restore whatever a pending reconnect was holding open — routes, DNS and
@@ -499,6 +541,63 @@ mod tests {
 
         assert_eq!(info, None);
         assert!(manager.preserved_network.is_none());
+    }
+
+    fn profile(host: &str, port: u16) -> VpnProfile {
+        VpnProfile {
+            id: "p1".into(),
+            name: "Test".into(),
+            host: host.into(),
+            port,
+            username: "u".into(),
+            trusted_cert: "".into(),
+        }
+    }
+
+    #[test]
+    fn test_known_gateway_addr_reused_for_same_gateway() {
+        let mut manager = VpnManager::new();
+        let addr: SocketAddr = "119.73.189.162:10443".parse().unwrap();
+        manager.last_gateway = Some(("vpn.example.com".into(), 10443, addr));
+
+        assert_eq!(
+            manager.known_gateway_addr(&profile("vpn.example.com", 10443)),
+            Some(addr)
+        );
+    }
+
+    #[test]
+    fn test_known_gateway_addr_not_reused_for_other_gateway() {
+        let mut manager = VpnManager::new();
+        let addr: SocketAddr = "119.73.189.162:10443".parse().unwrap();
+        manager.last_gateway = Some(("vpn.example.com".into(), 10443, addr));
+
+        assert_eq!(
+            manager.known_gateway_addr(&profile("other.example.com", 10443)),
+            None
+        );
+        assert_eq!(
+            manager.known_gateway_addr(&profile("vpn.example.com", 443)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_known_gateway_addr_none_before_first_connect() {
+        let manager = VpnManager::new();
+        assert_eq!(
+            manager.known_gateway_addr(&profile("vpn.example.com", 10443)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_probe_session_needs_a_connected_session() {
+        let mut manager = VpnManager::new();
+        assert!(!manager.probe_session());
+        // Connected status alone, with no live session, has nothing to probe.
+        manager.status = VpnStatus::Connected;
+        assert!(!manager.probe_session());
     }
 
     #[test]

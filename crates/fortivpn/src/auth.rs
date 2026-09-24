@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -194,21 +194,41 @@ pub(crate) fn build_tls_config(trusted_cert: &str) -> Arc<rustls::ClientConfig> 
     Arc::new(config)
 }
 
-/// Create a sync TLS connection to the FortiGate gateway.
-pub(crate) fn tls_connect(
-    host: &str,
-    port: u16,
-    trusted_cert: &str,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, FortiError> {
-    let addr = format!("{host}:{port}");
-    let socket_addr = addr
+/// Bound on every blocking read and write during login and logout.
+const SYNC_IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Resolve the gateway to the one address a session will use for everything.
+///
+/// IPv4 is preferred: the host route that keeps the tunnel's own traffic off
+/// the tunnel is IPv4-only, so an IPv6 gateway address would get no host route.
+pub fn resolve_gateway(host: &str, port: u16) -> Result<SocketAddr, FortiError> {
+    let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|e| FortiError::GatewayUnreachable(format!("DNS resolve {host}: {e}")))?
-        .next()
-        .ok_or_else(|| FortiError::GatewayUnreachable(format!("No addresses for {host}")))?;
-    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
+        .collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .copied()
+        .ok_or_else(|| FortiError::GatewayUnreachable(format!("No addresses for {host}")))
+}
+
+/// Create a sync TLS connection to the FortiGate gateway at an already
+/// resolved address. `host` is still needed for SNI and certificate checks.
+pub(crate) fn tls_connect(
+    host: &str,
+    addr: SocketAddr,
+    trusted_cert: &str,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, FortiError> {
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| FortiError::GatewayUnreachable(format!("{e}")))?;
     tcp.set_nodelay(true).ok();
+    // Without these a gateway that goes quiet mid-login — or a network that
+    // vanished while the machine slept — parks this thread until the kernel
+    // gives up on the TCP connection, minutes later.
+    tcp.set_read_timeout(Some(SYNC_IO_TIMEOUT)).ok();
+    tcp.set_write_timeout(Some(SYNC_IO_TIMEOUT)).ok();
 
     let config = build_tls_config(trusted_cert);
 
@@ -297,7 +317,20 @@ pub fn authenticate(
     password: &str,
     trusted_cert: &str,
 ) -> Result<(String, VpnConfig), FortiError> {
-    let mut tls = tls_connect(host, port, trusted_cert)?;
+    let addr = resolve_gateway(host, port)?;
+    authenticate_at(host, addr, username, password, trusted_cert)
+}
+
+/// [`authenticate`] against an already resolved gateway address — no DNS.
+pub fn authenticate_at(
+    host: &str,
+    addr: SocketAddr,
+    username: &str,
+    password: &str,
+    trusted_cert: &str,
+) -> Result<(String, VpnConfig), FortiError> {
+    let port = addr.port();
+    let mut tls = tls_connect(host, addr, trusted_cert)?;
 
     // Omit ajax=1 to avoid host check redirect (ret=1) on gateways that require it.
     // Without ajax=1, the gateway issues the SVPNCOOKIE directly on valid credentials.
@@ -324,7 +357,7 @@ pub fn authenticate(
     let _ = read_response(&mut tls)?;
 
     drop(tls);
-    let mut tls2 = tls_connect(host, port, trusted_cert)?;
+    let mut tls2 = tls_connect(host, addr, trusted_cert)?;
 
     let req = build_request("GET", "/remote/fortisslvpn_xml", host, port, &cookie, "");
     tls2.write_all(req.as_bytes()).map_err(FortiError::Io)?;

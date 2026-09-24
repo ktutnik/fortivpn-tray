@@ -8,6 +8,7 @@ mod notification;
 mod platform;
 mod profile;
 mod vpn;
+mod wake;
 
 use std::sync::{Arc, Mutex};
 
@@ -26,12 +27,17 @@ async fn main() {
     let vpn_manager = vpn::VpnManager::new();
 
     let (status_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+    let (wake_tx, _) = tokio::sync::broadcast::channel::<std::time::Duration>(4);
 
     let state = ipc::AppState {
         vpn: Arc::new(tokio::sync::Mutex::new(vpn_manager)),
         store: Arc::new(Mutex::new(store)),
         status_tx,
+        wake_tx: wake_tx.clone(),
     };
+
+    ipc::spawn_wake_handler(state.clone());
+    wake::spawn(wake_tx);
 
     if !installer::is_helper_installed() {
         log::warn!(target: "daemon", "Helper not installed, attempting installation");
