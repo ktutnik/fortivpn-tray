@@ -20,7 +20,7 @@
     <false/>
     <key>AssociatedBundleIdentifiers</key>
     <array>
-        <string>com.ktutnik.fortivpn-tray</string>
+        <string>com.ktutnik.fortivpntray</string>
     </array>
 </dict>
 </plist>
